@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.next/
+__pycache__/
+*.pyc
+
+# Local Environment / Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 3D Model Storage (Too large for GitHub)
+3dstudio-backend-main/storage/
+3dstudio-backend-main/tmp/
+3dstudio-backend-main/uploads/
+3dstudio-backend-main/Log/
+storage/
+tmp/
+uploads/
+
+# OS / Editor Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Backend temporary files
+3dstudio-backend-main/test_out.glb
+3dstudio-backend-main/BoxTextured.usdz
+3dstudio-backend-main/test_manual.usdz
+3dstudio-backend-main/BoxTextured_extracted/
