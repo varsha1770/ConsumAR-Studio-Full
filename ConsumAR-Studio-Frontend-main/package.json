@@ -18,9 +18,12 @@
     "@heroicons/react": "^2.2.0",
     "@types/uuid": "^10.0.0",
     "axios": "^1.13.5",
+    "bcryptjs": "^3.0.3",
     "draco3d": "^1.5.7",
     "lottie-react": "^2.4.1",
     "next": "16.1.6",
+    "next-auth": "^4.24.14",
+    "nodemailer": "^7.0.13",
     "postcss": "^8.5.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -29,12 +32,17 @@
     "uuid": "^13.0.0"
   },
   "devDependencies": {
+    "@auth/prisma-adapter": "^2.11.2",
+    "@prisma/client": "^6.19.3",
     "@tailwindcss/postcss": "^4.2.0",
+    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20",
+    "@types/nodemailer": "^8.0.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
+    "prisma": "^6.19.3",
     "tailwindcss": "^4.2.0",
     "typescript": "^5"
   }

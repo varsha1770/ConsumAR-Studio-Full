@@ -1,274 +1,264 @@
-"use client";
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import { EyeIcon, EyeSlashIcon } from "@heroicons/react/24/solid";
+'use client';
 
-interface ModelPreview3DProps {
-  glbUrl: string;
-  dimensions: { length: string; width: string; height: string };
-  unit?: string;
-  onModelDimensionsDetected?: (dimensions: { length: number; width: number; height: number }) => void;
+import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { EyeIcon, EyeSlashIcon, CubeTransparentIcon } from '@heroicons/react/24/solid';
+
+export default function ModelPreview3D({ 
+  glbUrl, 
+  dimensions = { length: "0", width: "0", height: "0" }, 
+  onModelDimensionsDetected,
+  onReset,
+  onError,
+  isOptimizing,
+  userTier = "NON_LOGGED",
+  isAdmin = false
+}: { 
+  glbUrl: string | null;
+  dimensions?: any;
+  onModelDimensionsDetected: any;
+  onReset?: () => void;
+  onError?: () => void;
   isOptimizing?: boolean;
-}
-
-const unitToMeters: Record<string, number> = { ft: 0.3048, in: 0.0254, cm: 0.01, mm: 0.001, m: 1 };
-
-export default function ModelPreview3D({ glbUrl, dimensions, unit = "ft", onModelDimensionsDetected, isOptimizing }: ModelPreview3DProps) {
-  const [modelLoaded, setModelLoaded] = useState(false);
-  const [rawDimensions, setRawDimensions] = useState({ x: 0, y: 0, z: 0 });
-  const [rawCenter, setRawCenter] = useState({ x: 0, y: 0, z: 0 });
+  userTier?: string;
+  isAdmin?: boolean;
+}) {
+  const vRef = useRef<any>(null);
+  const l1 = useRef<any>(null);
+  const l2 = useRef<any>(null);
+  const l3 = useRef<any>(null);
+  const syncRunning = useRef(false);
   const [showDimensions, setShowDimensions] = useState(true);
-  
-  const modelViewerRef = useRef<any>(null);
-  const line1Ref = useRef<SVGLineElement>(null);
-  const line2Ref = useRef<SVGLineElement>(null);
-  const line3Ref = useRef<SVGLineElement>(null);
-  const rafRef = useRef<number | null>(null);
-  const showDimensionsRef = useRef(true);
+  const [loadError, setLoadError] = useState(false);
+  const hasDetected = useRef(false);
 
-  const parseToM = useCallback((val: string | undefined | null) => {
-    if (!val) return 0;
-    // Regex matches numbers (including decimals/negatives) followed by optional space and unit
-    const m = val.trim().toLowerCase().match(/^(-?\d*\.?\d+)\s*(mm|cm|in|ft|m)$/i);
-    if (!m) {
-      // Fallback: try to just parse the number and assume meters
-      const fallback = parseFloat(val);
-      return isNaN(fallback) ? 0 : fallback;
+  // V22: Reset detection lock when the GLB changes
+  useEffect(() => {
+    hasDetected.current = false;
+  }, [glbUrl]);
+
+  const sync = useCallback(() => {
+    const v = vRef.current;
+    if (!v) return;
+    const up = (l: any, s1: string, s2: string) => {
+      const h1 = v.queryHotspot(`hotspot-${s1}`);
+      const h2 = v.queryHotspot(`hotspot-${s2}`);
+      if (h1?.canvasPosition && h2?.canvasPosition && l.current) {
+        l.current.setAttribute('x1', h1.canvasPosition.x);
+        l.current.setAttribute('y1', h1.canvasPosition.y);
+        l.current.setAttribute('x2', h2.canvasPosition.x);
+        l.current.setAttribute('y2', h2.canvasPosition.y);
+        l.current.style.opacity = '1';
+      } else if (l.current) {
+        l.current.style.opacity = '0';
+      }
+    };
+    up(l1, 'hp1', 'hp2');
+    up(l2, 'hp3', 'hp4');
+    up(l3, 'hp5', 'hp6');
+    
+    if (syncRunning.current) {
+      requestAnimationFrame(sync);
     }
-    const num = parseFloat(m[1]);
-    const unitText = m[2].toLowerCase();
-    return num * (unitToMeters[unitText] || 1);
   }, []);
 
-  const formatVal = useCallback((val: string, unit: string) => {
-    const meters = parseToM(val);
-    const converted = meters / (unitToMeters[unit] || 1);
-    // Use 2 decimal places to catch small changes like 2.48 to 2.52
-    return `${Math.round(converted * 100) / 100}${unit}`;
-  }, [parseToM]);
+  useEffect(() => {
+    syncRunning.current = true;
+    requestAnimationFrame(sync);
+    return () => { syncRunning.current = false; };
+  }, [sync]);
 
-  const targetScale = "1 1 1";
-
-  const drawLine = useCallback((line: SVGLineElement | null, viewer: any, n1: string, n2: string) => {
-    if (!line || !viewer) return;
-    // Align with slot names: use full 'hotspot-w1' etc.
-    const h1 = viewer.queryHotspot(`hotspot-${n1}`);
-    const h2 = viewer.queryHotspot(`hotspot-${n2}`);
-    if (!h1?.canvasPosition || !h2?.canvasPosition) {
-      line.setAttribute("opacity", "0");
-      return;
-    }
-    line.setAttribute("x1", h1.canvasPosition.x.toString());
-    line.setAttribute("y1", h1.canvasPosition.y.toString());
-    line.setAttribute("x2", h2.canvasPosition.x.toString());
-    line.setAttribute("y2", h2.canvasPosition.y.toString());
-    line.setAttribute("opacity", showDimensionsRef.current ? "1" : "0");
-  }, []);
-
-  const [hotspotPositions, setHotspotPositions] = useState<Record<string, string>>({});
-
-  const updateHotspots = useCallback(() => {
-    const viewer = modelViewerRef.current;
-    if (!viewer || !modelLoaded) return;
-
-    const d = viewer.getDimensions();
-    const c = viewer.getBoundingBoxCenter();
-    if (d.x === 0) return;
-
-    const minX = c.x - d.x / 2;
-    const maxX = c.x + d.x / 2;
-    const minY = c.y - d.y / 2;
-    const maxY = c.y + d.y / 2;
-    const minZ = c.z - d.z / 2;
-    const maxZ = c.z + d.z / 2;
-
-    // AESTHETIC OFFSETS (Picture 1 Look)
-    const topPadding = d.y * 0.1;
-    const sidePadding = d.x * 0.05;
-    
-    const hY = maxY + topPadding;
-    const sX = maxX + sidePadding;
-    const fZ = minZ - sidePadding;
-    const bZ = maxZ + sidePadding;
-
-    // p1: Top-Front-Left (Padded)
-    // p2: Top-Front-Right (Padded)
-    // p3: Bottom-Front-Right (Padded)
-    // p4: Bottom-Back-Right (Padded)
-    const p1 = `${minX}m ${hY}m ${fZ}m`;
-    const p2 = `${sX}m ${hY}m ${fZ}m`;
-    const p3 = `${sX}m ${minY}m ${fZ}m`;
-    const p4 = `${sX}m ${minY}m ${bZ}m`;
-    
-    // Labels centered on lines
-    const lw = `${c.x}m ${hY + (topPadding * 0.5)}m ${fZ}m`;
-    const lh = `${sX + (sidePadding * 1.5)}m ${c.y}m ${fZ}m`;
-    const ld = `${sX + (sidePadding * 1.5)}m ${minY}m ${c.z}m`;
-
-    viewer.updateHotspot({ name: "hotspot-p1", position: p1 });
-    viewer.updateHotspot({ name: "hotspot-p2", position: p2 });
-    viewer.updateHotspot({ name: "hotspot-p3", position: p3 });
-    viewer.updateHotspot({ name: "hotspot-p4", position: p4 });
-    viewer.updateHotspot({ name: "hotspot-label-w", position: lw });
-    viewer.updateHotspot({ name: "hotspot-label-h", position: lh });
-    viewer.updateHotspot({ name: "hotspot-label-d", position: ld });
-
-    const u = (slot: string, val: string) => {
-      const el = viewer.querySelector(`[slot="hotspot-${slot}"]`);
-      if (el) (el as HTMLElement).innerText = formatVal(val, unit);
-    };
-    u("label-w", dimensions.length); 
-    u("label-h", dimensions.height); 
-    u("label-d", dimensions.width);   
-  }, [dimensions.length, dimensions.width, dimensions.height, unit, formatVal, modelLoaded]);
-
-  const lastDetectedRef = useRef<string>("");
+  const detectCallbackRef = useRef(onModelDimensionsDetected);
+  useEffect(() => {
+    detectCallbackRef.current = onModelDimensionsDetected;
+  }, [onModelDimensionsDetected]);
 
   useEffect(() => {
-    const viewer = modelViewerRef.current;
-    if (!viewer) return;
+    const v = vRef.current;
+    if (!v || !glbUrl) return;
 
-    const handleLoad = () => {
-      const d = viewer.getDimensions();
-      const c = viewer.getBoundingBoxCenter();
-      
-      const key = `${d.x}-${d.y}-${d.z}`;
-      if (key === lastDetectedRef.current) return;
-      lastDetectedRef.current = key;
+    const run = () => {
+      const v = vRef.current;
+      if (!v || hasDetected.current) return;
 
-      setRawDimensions({ x: d.x, y: d.y, z: d.z });
-      setRawCenter({ x: c.x, y: c.y, z: c.z });
-      setModelLoaded(true);
-      
-      onModelDimensionsDetected?.({ length: d.x, width: d.z, height: d.y });
-    };
+      try {
+        let size = v.getDimensions ? v.getDimensions() : { x: 0, y: 0, z: 0 };
+        if ((!size || size.x === 0) && v.model) {
+          if (typeof v.model.getDimensions === 'function') {
+            const s = v.model.getDimensions();
+            size = { x: s.x, y: s.y, z: s.z };
+          } else if (v.model.boundingBox) {
+            const { min, max } = v.model.boundingBox;
+            size = { x: max.x - min.x, y: max.y - min.y, z: max.z - min.z };
+          }
+        }
 
-    viewer.addEventListener("load", handleLoad);
-    if (viewer.loaded) handleLoad();
-    
-    // FRAME-SYNC LOOP: Update hotspots and lines 60 times per second
-    // This removes all "diagonal" frames and flickering.
-    const runLoop = () => {
-      if (!modelLoaded) {
-        rafRef.current = requestAnimationFrame(runLoop);
-        return;
+        if (!size || (size.x === 0 && size.y === 0 && size.z === 0)) return;
+
+        hasDetected.current = true;
+        console.log("[ModelPreview3D] Final Identity Anchor Activated:", size);
+
+        let center = v.getBoundingBoxCenter ? v.getBoundingBoxCenter() : { x: 0, y: 0, z: 0 };
+        if (center.x === 0 && center.y === 0 && center.z === 0 && v.model?.boundingBox) {
+          const { min, max } = v.model.boundingBox;
+          center = { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
+        }
+
+        const min = { x: center.x - size.x / 2, y: center.y - size.y / 2, z: center.z - size.z / 2 };
+        const max = { x: center.x + size.x / 2, y: center.y + size.y / 2, z: center.z + size.z / 2 };
+
+        if (detectCallbackRef.current) {
+          detectCallbackRef.current({ length: size.x, height: size.y, width: size.z });
+        }
+
+        const set = (n: string, p: string) => v.updateHotspot({ name: `hotspot-${n}`, position: p });
+        set('hp1', `${min.x} ${max.y} ${min.z}m`);
+        set('hp2', `${max.x} ${max.y} ${min.z}m`);
+        set('l1', `${center.x} ${max.y} ${min.z}m`);
+        set('hp3', `${max.x} ${min.y} ${min.z}m`);
+        set('hp4', `${max.x} ${max.y} ${min.z}m`);
+        set('l2', `${max.x} ${center.y} ${min.z}m`);
+        set('hp5', `${max.x} ${min.y} ${min.z}m`);
+        set('hp6', `${max.x} ${min.y} ${max.z}m`);
+        set('l3', `${max.x} ${min.y} ${center.z}m`);
+
+      } catch (err) {
+        console.error("[ModelPreview3D] Detection Error:", err);
       }
-
-      updateHotspots();
-      
-      const line1 = line1Ref.current;
-      const line2 = line2Ref.current;
-      const line3 = line3Ref.current;
-      
-      if (showDimensionsRef.current) {
-        drawLine(line1, viewer, "p1", "p2");
-        drawLine(line2, viewer, "p2", "p3");
-        drawLine(line3, viewer, "p3", "p4");
-      } else {
-        if (line1) line1.setAttribute("opacity", "0");
-        if (line2) line2.setAttribute("opacity", "0");
-        if (line3) line3.setAttribute("opacity", "0");
-      }
-
-      rafRef.current = requestAnimationFrame(runLoop);
     };
 
-    rafRef.current = requestAnimationFrame(runLoop);
+    v.addEventListener('load', () => {
+       setLoadError(false);
+       run();
+    });
+    v.addEventListener('error', (e: any) => {
+       console.error("[ModelPreview3D] Model failed to load:", e);
+       setLoadError(true);
+       if (onError) onError();
+    });
+    if (v.loaded) run();
     
-    return () => {
-      viewer.removeEventListener("load", handleLoad);
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    // Interval fallback to ensure detection triggers
+    const i = setInterval(() => {
+       if (hasDetected.current) clearInterval(i);
+       else run();
+    }, 500);
+
+    return () => { 
+      clearInterval(i); 
     };
-  }, [onModelDimensionsDetected, modelLoaded, updateHotspots, drawLine]);
+  }, [glbUrl, JSON.stringify(dimensions)]); // V48: Re-run when dimensions/units change to fix position drift
 
-  // Remove the old disconnected useEffects that were causing the sync issues
-  useEffect(() => {
-    showDimensionsRef.current = showDimensions;
-  }, [showDimensions]);
+  if (loadError) {
+    return (
+      <div className="w-full h-[500px] bg-gray-50 flex flex-col items-center justify-center text-center p-6 rounded-[2rem] border-2 border-dashed border-red-200">
+        <CubeTransparentIcon className="w-12 h-12 text-red-400 mb-4 animate-pulse" />
+        <h3 className="text-lg font-bold text-gray-900 mb-2">Failed to Load 3D Model</h3>
+        <p className="text-sm text-gray-500 mb-6 max-w-xs">The model file might be corrupted or inaccessible. Try uploading it again.</p>
+        <div className="flex gap-4">
+          <button 
+            onClick={() => window.location.reload()}
+            className="px-6 py-2 bg-white border-2 border-gray-200 text-gray-700 rounded-xl font-bold shadow-sm hover:bg-gray-50 transition-colors"
+          >
+            Reload Page
+          </button>
+          {onReset && (
+            <button 
+              onClick={onReset}
+              className="px-6 py-2 bg-red-600 text-white rounded-xl font-bold shadow-lg hover:bg-red-700 transition-colors"
+            >
+              Reset & Upload New
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
-  useEffect(() => { 
-    if (modelLoaded) {
-      updateHotspots();
-      // Schedule a second pass to catch model-viewer layout changes
-      const t = setTimeout(updateHotspots, 200);
-      return () => clearTimeout(t);
-    }
-  }, [glbUrl, dimensions.length, dimensions.width, dimensions.height, modelLoaded, updateHotspots]);
-
-  useEffect(() => { showDimensionsRef.current = showDimensions; }, [showDimensions]);
-
-  const orbitDist = useMemo(() => {
-    const max = Math.max(rawDimensions.x, rawDimensions.y, rawDimensions.z) || 1.5;
-    return `${max * 2.5}m`;
-  }, [rawDimensions.x, rawDimensions.y, rawDimensions.z]);
+  if (!glbUrl) return <div className="w-full h-[500px] bg-white flex items-center justify-center text-gray-300 rounded-[2rem] border-2 border-dashed border-gray-100">No Model Selected</div>;
 
   return (
-    <div className="relative w-full h-full bg-white font-sans overflow-hidden border border-gray-200 shadow-sm rounded-xl">
-      <style jsx>{`
+    <div className="relative w-full h-[500px] bg-white border-none rounded-[2rem] overflow-hidden">
+      <style>{`
         .dot { 
-          display: block; width: 8px; height: 8px; 
-          border: 2px solid #222; border-radius: 9999px; 
+          width: 8px; 
+          height: 8px; 
+          border: 1px solid #000; 
+          border-radius: 50%; 
           background: #fff; 
-          pointer-events: none; z-index: 100;
+          pointer-events: none; 
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin: 0;
+          padding: 0;
           box-sizing: border-box;
+          position: absolute;
+          transform: translate(-50%, -50%);
         }
-        .dim { 
-          display: block; padding: 4px 10px; 
-          background: #fff; border: 1px solid #222; 
-          border-radius: 4px; color: #222; 
-          font-size: 13px; font-weight: 800; 
-          pointer-events: none; z-index: 200; 
-          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); 
+        .lbl { 
+          background: #fff; 
+          border: 1px solid #333; 
+          padding: 2px 8px; 
+          border-radius: 4px; 
+          font-weight: 500; 
+          font-family: sans-serif; 
+          pointer-events: none; 
+          font-size: 11px; 
+          color: #000; 
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          white-space: nowrap;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+          margin: 0;
+          box-sizing: border-box;
+          min-width: 40px;
+          height: 22px;
+          position: absolute;
+          transform: translate(-50%, -100%);
         }
-        .hide { display: none !important; }
+        .lbl-y { transform: translate(50%, -50%); }
       `}</style>
-
-      <model-viewer
-        ref={modelViewerRef}
-        src={glbUrl}
-        alt="3D model preview"
-        scale={targetScale}
-        camera-target="auto"
-        camera-orbit={`45deg 75deg ${orbitDist}`}
-        camera-controls
-        exposure="1.0"
-        shadow-intensity="1.5"
-        shadow-softness="1.0"
-        environment-image="neutral"
-        min-field-of-view="10deg"
-        max-field-of-view="120deg"
-        interaction-prompt="none"
-        style={{ width: "100%", height: "100%", backgroundColor: "#ffffff" }}
-      >
-        {/* Hotspots - simplified visibility and registration */}
-        <div slot="hotspot-label-w" data-position="0 0 0m" className={`dim${showDimensions && modelLoaded && !isOptimizing ? "" : " hide"}`} />
-        <div slot="hotspot-label-h" data-position="0 0 0m" className={`dim${showDimensions && modelLoaded && !isOptimizing ? "" : " hide"}`} />
-        <div slot="hotspot-label-d" data-position="0 0 0m" className={`dim${showDimensions && modelLoaded && !isOptimizing ? "" : " hide"}`} />
-
-        {/* 4 Pinpoints system */}
-        <div slot="hotspot-p1" data-position="0 0 0m" className={`dot${showDimensions && modelLoaded && !isOptimizing ? "" : " hide"}`} />
-        <div slot="hotspot-p2" data-position="0 0 0m" className={`dot${showDimensions && modelLoaded && !isOptimizing ? "" : " hide"}`} />
-        <div slot="hotspot-p3" data-position="0 0 0m" className={`dot${showDimensions && modelLoaded && !isOptimizing ? "" : " hide"}`} />
-        <div slot="hotspot-p4" data-position="0 0 0m" className={`dot${showDimensions && modelLoaded && !isOptimizing ? "" : " hide"}`} />
+      <model-viewer ref={vRef} src={glbUrl} camera-controls auto-rotate bounds="tight" exposure="1.2" shadow-intensity="1.5" environment-image="neutral" style={{ width: '100%', height: '100%', background: '#f3f4f6', margin: 0, padding: 0 }}>
+        {showDimensions && (
+          <>
+            <div slot="hotspot-hp1" className="dot" /> <div slot="hotspot-hp2" className="dot" />
+            <div slot="hotspot-hp3" className="dot" /> <div slot="hotspot-hp4" className="dot" />
+            <div slot="hotspot-hp5" className="dot" /> <div slot="hotspot-hp6" className="dot" />
+            <div slot="hotspot-l1" className="lbl lbl-x">{dimensions.length}</div>
+            <div slot="hotspot-l2" className="lbl lbl-y">{dimensions.height}</div>
+            <div slot="hotspot-l3" className="lbl lbl-z">{dimensions.width}</div>
+          </>
+        )}
       </model-viewer>
 
-      <svg 
-        className={`absolute inset-0 pointer-events-none transition-opacity duration-300 ${showDimensions && !isOptimizing ? "opacity-100" : "opacity-0"}`} 
-        style={{ zIndex: 1000, width: "100%", height: "100%" }}
+      {userTier !== "PAID" && (
+        <div 
+          className="absolute inset-0 pointer-events-none select-none opacity-15 z-[100]"
+          style={{ 
+            backgroundImage: 'url("/water-mark.png")',
+            backgroundRepeat: 'repeat',
+            backgroundSize: '180px 180px', 
+          }}
+        />
+      )}
+      
+      <button
+        onClick={() => setShowDimensions(!showDimensions)}
+        className={`absolute bottom-4 right-4 z-[5000] flex items-center gap-2 bg-white border-2 rounded-[14px] px-4 py-1.5 shadow-md hover:scale-105 transition-all ${showDimensions ? 'border-[#00A651]' : 'border-gray-300'}`}
       >
-        <line ref={line1Ref} stroke="#000" strokeWidth="2" strokeDasharray="4 4" strokeLinecap="round" />
-        <line ref={line2Ref} stroke="#000" strokeWidth="2" strokeDasharray="4 4" strokeLinecap="round" />
-        <line ref={line3Ref} stroke="#000" strokeWidth="2" strokeDasharray="4 4" strokeLinecap="round" />
+        <span className={`font-bold text-[15px] tracking-wide ${showDimensions ? 'text-[#00A651]' : 'text-gray-400'}`}>Dimensions</span>
+        {showDimensions ? (
+          <EyeIcon className="w-5 h-5 text-[#00A651]" />
+        ) : (
+          <EyeSlashIcon className="w-5 h-5 text-gray-400" />
+        )}
+      </button>
+      <svg className="absolute inset-0 pointer-events-none w-full h-full overflow-visible" style={{ zIndex: 10, margin: 0, padding: 0 }}>
+        <line ref={l1} stroke="#000" strokeWidth="1.5" strokeDasharray="4,3" strokeLinecap="round" style={{ transition: 'opacity 0.2s' }} />
+        <line ref={l2} stroke="#000" strokeWidth="1.5" strokeDasharray="4,3" strokeLinecap="round" style={{ transition: 'opacity 0.2s' }} />
+        <line ref={l3} stroke="#000" strokeWidth="1.5" strokeDasharray="4,3" strokeLinecap="round" style={{ transition: 'opacity 0.2s' }} />
       </svg>
-
-      <div className={`absolute bottom-6 right-6 z-[2000] transition-opacity duration-500 ${isOptimizing ? "opacity-0 pointer-events-none" : "opacity-100"}`}>
-        <button
-          onClick={() => setShowDimensions(!showDimensions)}
-          disabled={isOptimizing}
-          className="p-3 bg-white rounded-full shadow-2xl border-2 border-green-500 text-green-600 hover:scale-110 active:scale-95 transition-all flex items-center justify-center transform"
-        >
-          {showDimensions ? <EyeIcon className="w-6 h-6" /> : <EyeSlashIcon className="w-6 h-6" />}
-        </button>
-      </div>
     </div>
   );
 }

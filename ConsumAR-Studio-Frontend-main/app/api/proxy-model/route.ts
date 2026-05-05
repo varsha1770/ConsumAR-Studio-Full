@@ -5,6 +5,8 @@ import { NextRequest, NextResponse } from 'next/server';
  * This route fetches content from Amazon S3 on the server side
  * to bypass browser CORS blocks. It now uses pure 'fetch' which is faster
  * and much more reliable for signed security links.
+ * 
+ * UPDATE: Now supports local backend models (localhost:5001) to bypass local CORS blocks.
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -17,47 +19,63 @@ export async function GET(request: NextRequest) {
   try {
     const parsed = new URL(url);
     const hostname = parsed.hostname.toLowerCase();
-    
-    // Check if it's an S3 URL (Regional or Global)
-    if (hostname.includes(".s3.") || hostname.endsWith(".amazonaws.com")) {
-      console.log(`[proxy-model] Universal Fetch: ${url.substring(0, 80)}...`);
-      
-      const fetchRes = await fetch(url, {
-        method: 'GET',
-        // Next.js cache bypass to ensure fresh models
-        cache: 'no-store'
-      });
-      
-      if (!fetchRes.ok) {
-        throw new Error(`S3 Fetch failed with status ${fetchRes.status}`);
-      }
+    const isS3 = hostname.includes(".s3.") || hostname.endsWith(".amazonaws.com");
+    const isLocal = hostname === "localhost" || hostname === "127.0.0.1";
 
-      const headers: Record<string, string> = {
-        'Content-Type': fetchRes.headers.get('Content-Type') || (url.toLowerCase().endsWith('.glb') ? 'model/gltf-binary' : 'application/octet-stream'),
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': '*',
-        'Cache-Control': 'public, max-age=3600',
+    if (isS3 || isLocal) {
+      console.log(`[proxy-model] >> START PROXY for: ${url}`);
+      
+      const tryFetch = async (targetUrl: string) => {
+        return fetch(targetUrl, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: { 'Accept': '*/*' }
+        });
       };
 
-      const contentLength = fetchRes.headers.get('Content-Length');
-      if (contentLength) {
-        headers['Content-Length'] = contentLength;
+      let response = await tryFetch(url);
+      
+      // V16: IPv6 -> IPv4 Fallback
+      if (!response.ok && url.includes("localhost")) {
+        const fallbackUrl = url.replace("localhost", "127.0.0.1");
+        console.warn(`[proxy-model] IPv6 Fail, trying IPv4: ${fallbackUrl}`);
+        response = await tryFetch(fallbackUrl);
       }
 
-      // Stream the response body directly to the client
-      return new NextResponse(fetchRes.body, { status: 200, headers });
+      if (!response.ok) {
+        console.error(`[proxy-model] Backend error ${response.status} for ${url}`);
+        return new NextResponse(null, { status: response.status });
+      }
+
+      let contentType = response.headers.get('content-type');
+      if (!contentType || contentType === 'application/octet-stream') {
+        if (url.toLowerCase().endsWith('.glb')) contentType = 'model/gltf-binary';
+        else if (url.toLowerCase().endsWith('.usdz')) contentType = 'model/vnd.usdz+zip';
+        else contentType = 'application/octet-stream';
+      }
+
+      // V17: High Performance Streaming
+      // Directly stream the body to avoid the 'await response.blob()' bottleneck.
+      // This allows the data to flow to the browser immediately.
+      console.log(`[proxy-model] SUCCESS (Streaming): Starting transfer for ${url}`);
+
+      return new NextResponse(response.body, {
+        status: 200,
+        headers: {
+          'Content-Type': contentType,
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=3600',
+          // Pass through content-length if available for browser progress tracking
+          ...(response.headers.get('content-length') ? { 'Content-Length': response.headers.get('content-length')! } : {}),
+        },
+      });
     }
 
-    return NextResponse.json({ error: 'Only S3 URLs are supported via this proxy' }, { status: 403 });
+    return new NextResponse('Access Denied', { status: 403 });
 
   } catch (err: any) {
-    console.error('[proxy-model] Universal Error:', err);
-    return NextResponse.json({ 
-      error: 'Proxy Fetch Failed', 
-      details: err.message,
-      code: err.name 
-    }, { status: 500 });
+    console.error('[proxy-model] Fatal Error:', err.message);
+    return new NextResponse(`Proxy error: ${err.message}`, { status: 500 });
   }
 }
 

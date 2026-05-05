@@ -1,0 +1,175 @@
+"use client";
+import { useState } from "react";
+import Image from "next/image";
+import { useRouter } from "next/navigation";
+import { signIn } from "next-auth/react";
+import Link from "next/link";
+import axios from "axios";
+import toast from "react-hot-toast";
+import { validateEmail, validatePassword, normalizeEmail } from "@/lib/auth";
+
+export default function SignupPage() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const [emailError, setEmailError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const router = useRouter();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    console.log("[signup_frontend] Submit clicked for:", email);
+    setEmailError("");
+    setPasswordError("");
+
+    if (!email || !password) {
+      toast.error("Please fill in all fields");
+      return;
+    }
+
+    if (!validateEmail(email)) {
+      setEmailError("Invalid email format (must contain @ and .)");
+      return;
+    }
+
+    if (!validatePassword(password)) {
+      setPasswordError("Weak password: 8+ chars, 1 Uppercase, 1 Number, 1 Special (!@#$..)");
+      return;
+    }
+
+    const cleanEmail = normalizeEmail(email);
+
+    setIsLoading(true);
+    try {
+      console.log("[signup_frontend] Sending POST request to /api/signup...");
+      const res = await fetch("/api/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: cleanEmail, password }),
+      });
+      
+      const data = await res.json();
+      console.log("[signup_frontend] Response:", data);
+
+      if (res.ok && data.success) {
+        toast.success("Account created! Logging you in...");
+        // Auto-login using the credentials provider
+        await signIn("credentials", {
+          email: cleanEmail,
+          password: password,
+          callbackUrl: "/studio",
+          redirect: true
+        });
+      } else {
+        toast.error(data.error || "Signup failed");
+      }
+    } catch (error: any) {
+      console.error("[signup_frontend] error:", error);
+      toast.error("Network error");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-gray-50 p-4">
+      {/* Top Left Branding */}
+      <div className="fixed top-5 left-5 z-10 pointer-events-none">
+        <Image
+          src="/TIFLabs-main.png"
+          alt="TIF Labs Logo"
+          width={150}
+          height={50}
+          className="h-6 w-auto object-contain"
+          priority
+        />
+      </div>
+      <div className="w-full max-w-sm rounded-[4px] border border-gray-300 bg-white p-6 shadow-sm">
+        <h1 className="mb-6 text-center text-2xl font-serif font-semibold text-gray-800">SignUp</h1>
+        
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1">
+            <label className="block text-sm font-semibold text-gray-900">Email:</label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full rounded-[4px] border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+              placeholder="email@example.com"
+              autoComplete="off"
+              required
+            />
+            {emailError && <p className="mt-0.5 text-[10px] font-medium text-red-600">{emailError}</p>}
+          </div>
+
+          <div className="space-y-1">
+            <label className="block text-sm font-semibold text-gray-900">Password:</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full rounded-[4px] border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
+              placeholder="••••••"
+              autoComplete="off"
+              required
+            />
+            {passwordError && <p className="mt-0.5 text-[10px] font-medium text-red-600">{passwordError}</p>}
+          </div>
+
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="w-full rounded-[4px] bg-indigo-700 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-800 disabled:opacity-50"
+          >
+            {isLoading ? "Creating Account..." : "SignUp"}
+          </button>
+        </form>
+
+        <div className="relative my-6">
+          <div className="absolute inset-0 flex items-center">
+            <div className="w-full border-t border-gray-300"></div>
+          </div>
+          <div className="relative flex justify-center text-[10px] uppercase">
+            <span className="bg-white px-2 text-gray-500">Or continue with</span>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          disabled={isGoogleLoading}
+          onClick={async () => {
+             const { signIn } = await import("next-auth/react");
+             setIsGoogleLoading(true);
+             signIn("google", { callbackUrl: "/studio" });
+          }}
+          className="flex w-full items-center justify-center gap-3 rounded-[4px] border border-gray-300 bg-white py-2 px-4 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-50 mb-4 disabled:opacity-50"
+        >
+          {isGoogleLoading ? (
+            <div className="flex items-center gap-2">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"></div>
+              <span>Connecting...</span>
+            </div>
+          ) : (
+            <>
+              <svg className="h-5 w-5" viewBox="0 0 24 24">
+                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
+                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                <path d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.83z" fill="#FBBC05" />
+                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.66l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.83c.87-2.6 3.3-4.52 6.16-4.52z" fill="#EA4335" />
+              </svg>
+              Sign up with Google
+            </>
+          )}
+        </button>
+
+        <p className="mt-6 text-center text-xs text-gray-600">
+          Already have an account?{" "}
+          <Link href="/" className="font-medium text-indigo-600 hover:text-indigo-500 underline">
+            Login
+          </Link>
+        </p>
+      </div>
+    </div>
+  );
+}

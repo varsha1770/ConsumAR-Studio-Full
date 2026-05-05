@@ -8,7 +8,10 @@ S3_BUCKET = "glb-output"
 S3_FOLDER = "temp"
 REGION = "ap-south-1"
 
-TMP_DIR = tempfile.gettempdir()
+# V45: Unified Storage - ensure cloud downloads land in the server's storage folder
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TMP_DIR = os.path.join(BASE_DIR, "storage")
+os.makedirs(TMP_DIR, exist_ok=True)
 s3 = boto3.client("s3", region_name=REGION)
 
 
@@ -47,13 +50,22 @@ def download_from_s3(s3_key):
     normalized_key = os.path.normpath(s3_key) if s3_key else ""
     is_absolute = os.path.isabs(normalized_key) or (len(normalized_key) > 1 and normalized_key[1] == ':')
     
-    # 2. LOCAL DISK CHECK
+    # 2. LOCAL DISK CHECK (V15: Persistent Storage Search)
     if is_absolute and os.path.exists(normalized_key):
         print(f"DEBUG: S3_Utils Direct Path Injection triggered for {normalized_key}")
+        # Return the path as is if it's in storage, or copy it to a new temp if not
+        if TMP_DIR in normalized_key: return normalized_key
         local_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.glb")
         import shutil
         shutil.copy2(normalized_key, local_path)
         return local_path
+    
+    # Check if filename already exists in local storage
+    filename_only = os.path.basename(normalized_key)
+    local_storage_path = os.path.join(TMP_DIR, filename_only)
+    if os.path.exists(local_storage_path):
+        print(f"DEBUG: S3_Utils found file in local storage cache: {local_storage_path}")
+        return local_storage_path
 
     # 3. SMART KEY PREPARATION
     filename = os.path.basename(normalized_key)

@@ -1,0 +1,125 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String        @id @default(uuid()) @db.Uuid
+  password      String?
+  createdAt     DateTime      @default(now())
+  email         String        @unique @map("email")
+  lastLogin     DateTime?
+  emailVerified DateTime?
+  image         String?
+  name          String?
+  tier          Tier          @default(FREE)
+  isAdmin       Boolean       @default(false)
+  accounts      Account[]
+  sessions      Session[]
+  activities    Activity[]
+  history       HistoryItem[]
+  settings      UserSettings?
+
+  @@map("Users")
+  @@index([email])
+  @@index([tier])
+  @@index([isAdmin])
+}
+
+model UserSettings {
+  id            String   @id @default(cuid())
+  userId        String   @unique @db.Uuid
+  glbFile       String?
+  usdzFile      String?
+  glbFileKey    String?
+  usdzFileKey   String?
+  glbFileName   String?
+  dimensions    Json?
+  dimensionUnit String?
+  scaleValue    String?
+  updatedAt     DateTime @updatedAt
+  userEmail     String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String   @db.Uuid
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model HistoryItem {
+  id            String   @id @default(cuid())
+  userId        String   @db.Uuid
+  fileName      String
+  action        String
+  details       String?
+  glbFile       String?
+  usdzFile      String?
+  createdAt     DateTime @default(now())
+  downloadCount Int      @default(0)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("history_items")
+}
+
+model Activity {
+  id            String   @id @default(cuid())
+  userId        String?  @db.Uuid
+  type          String
+  fileName      String
+  createdAt     DateTime @default(now())
+  glbFile       String?
+  usdzFile      String?
+  downloadCount Int      @default(0)
+  ipAddress     String?
+  userEmail     String?
+  user          User?    @relation(fields: [userId], references: [id])
+
+  @@map("activities")
+  @@index([userId])
+  @@index([type])
+  @@index([createdAt])
+  @@index([ipAddress])
+  @@index([userEmail])
+}
+
+enum Tier {
+  NON_LOGGED
+  FREE
+  PAID
+}

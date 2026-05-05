@@ -31,3 +31,5 @@ Thumbs.db
 3dstudio-backend-main/BoxTextured.usdz
 3dstudio-backend-main/test_manual.usdz
 3dstudio-backend-main/BoxTextured_extracted/
+
+/generated/prisma

@@ -124,7 +124,8 @@ from resize import resize_glb, get_dimensions
 args        = json.loads(sys.argv[1])
 dims_before = get_dimensions(args['input_path'])
 resize_glb(args['input_path'], args['output_path'],
-           args['target_dims'], mode=args['mode'], axis=args['axis'])
+           args['target_dims'], mode=args['mode'], axis=args['axis'],
+           watermark=args.get('watermark', False))
 dims_after  = get_dimensions(args['output_path'])
 
 sys.stdout = _out
@@ -307,6 +308,13 @@ def resize_api():
         unit   = data.get("unit",  "cm")
         mode   = data.get("mode",  "non-uniform")
         axis   = data.get("axis",  "y")
+        tier   = data.get("tier", "GUEST")
+        force_watermark = data.get("force_watermark", False)
+        
+        # Watermark is ON if Tier is not PAID, or if forced (for Admin testing)
+        watermark = (tier.upper() != "PAID") or (str(force_watermark).lower() == "true")
+        
+        logger.info(f"!!! TIER CHECK: tier={tier}, forced={force_watermark} => watermark={watermark} !!!")
 
         log_request_start(route,
             f"s3_key={s3_key}  target={width}x{height}x{depth} {unit}  mode={mode}")
@@ -349,6 +357,7 @@ def resize_api():
             "target_dims": target_dims,
             "mode":        mode,
             "axis":        axis,
+            "watermark":   watermark
         }, timeout=120)
 
         result, err = _child_result(proc, stdout, stderr, route)

@@ -1,4 +1,7 @@
 import { NextResponse } from 'next/server';
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import prisma from "@/lib/prisma";
 
 const EC2_URL = process.env.EC2_GENERATE_URL;
 
@@ -56,6 +59,24 @@ export async function POST(request: Request) {
     }
 
     const data = JSON.parse(text);
+
+    // LOG HISTORY
+    try {
+      const session = await getServerSession(authOptions);
+      if (session?.user?.id) {
+        await (prisma as any).historyItem.create({
+          data: {
+            userId: (session.user as any).id,
+            fileName: data.glb_url?.split('/').pop() || "Generated Model",
+            action: "UPLOAD",
+            glbFile: data.glb_url,
+          }
+        });
+      }
+    } catch (logErr) {
+      console.warn("[generate-3d] Failed to log history:", logErr);
+    }
+
     return NextResponse.json(data);
 
   } catch (err: any) {

@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 @layer base {
+
   html {
     -webkit-tap-highlight-color: transparent;
   }
@@ -32,7 +33,70 @@
   }
 
   body {
-    background-color: #F2F2F3;
-    font-family: system-ui, -apple-system, sans-serif;
+    background-color: #F8F9FA;
+    font-family: var(--font-outfit), system-ui, -apple-system, sans-serif;
+    font-weight: 300;
+    color: #1A1A1A;
+    letter-spacing: -0.01em;
+  }
+
+  /* PREMIUM GLASSMORPHISM */
+  .glass-card {
+    background: rgba(255, 255, 255, 0.6);
+    backdrop-filter: blur(12px) saturate(180%);
+    -webkit-backdrop-filter: blur(12px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.05);
+  }
+
+  .glass-morphism {
+    background: rgba(255, 255, 255, 0.4);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+  }
+
+  /* CUSTOM PREMIUM ANIMATIONS */
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes zoom-in {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  .animate-in {
+    animation-duration: 500ms;
+    animation-fill-mode: forwards;
+    animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .fade-in {
+    animation-name: fade-in;
+  }
+
+  @keyframes shine {
+    0% { transform: translateX(-150%) skewX(-25deg); }
+    100% { transform: translateX(150%) skewX(-25deg); }
+  }
+
+  .animate-shine {
+    animation: shine 2.5s infinite ease-in-out;
+  }
+
+  .zoom-in-95 {
+    animation-name: zoom-in;
+  }
+
+  /* Hide scrollbar for Chrome, Safari and Opera */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Hide scrollbar for IE, Edge and Firefox */
+  .no-scrollbar {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
   }
 }

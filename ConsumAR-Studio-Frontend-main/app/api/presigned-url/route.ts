@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServerSession } from "next-auth/next";
+import { authOptions } from "@/lib/auth";
+import prisma from "@/lib/prisma";
 
 const LAMBDA_PRESIGNED_URL = process.env.PRESIGNED_URL_SERVICE!;
 const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
@@ -17,10 +20,54 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  // --- Upload Limit Check ---
+  const session = await getServerSession(authOptions);
+  const ip = request.headers.get("x-forwarded-for") || request.headers.get("remote-addr") || "unknown";
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+
+  let maxUploads = 10; // Default NON_LOGGED
+  let userId = null;
+  let prefix = "";
+
+  if (session?.user?.id) {
+    userId = session.user.id;
+    const user = await (prisma.user as any).findUnique({ where: { id: userId }});
+    const tier = user?.tier || "FREE";
+    const isAdmin = user?.isAdmin || tier === "SUPER_ADMIN";
+
+    if (isAdmin) {
+      maxUploads = 999999;
+      prefix = `admin/${userId}/`;
+    } else if (tier === "PAID") {
+      maxUploads = 999999;
+      prefix = `paid/${userId}/`;
+    } else if (tier === "FREE") {
+      maxUploads = 10;
+      prefix = `free/${userId}/`;
+    }
+  }
+
+  const uploadsUsed = await (prisma.activity as any).count({
+    where: {
+      ...(userId ? { userId } : { userId: null, ipAddress: ip }),
+      type: "UPLOAD",
+      createdAt: { gte: startOfDay }
+    }
+  });
+
+  if (uploadsUsed >= maxUploads) {
+    return NextResponse.json({ error: "Daily upload limit reached. Please upgrade or sign in." }, { status: 403 });
+  }
+  // --------------------------
+
   try {
     const lambdaUrl = new URL(LAMBDA_PRESIGNED_URL);
     lambdaUrl.searchParams.set('bucket_name', bucket_name);
     lambdaUrl.searchParams.set('file_type', file_type);
+    if (prefix) {
+      lambdaUrl.searchParams.set('prefix', prefix);
+    }
 
     let lambdaRes: Response | null = null;
 
@@ -52,6 +99,22 @@ export async function GET(request: NextRequest) {
     }
 
     const data = await lambdaRes.json();
+
+    // Log the successful upload initiation
+    try {
+      await (prisma.activity as any).create({
+        data: {
+          userId: userId,
+          ipAddress: ip,
+          type: "UPLOAD",
+          fileName: data.file_key || "Uploaded Model",
+          glbFile: data.upload_url, // Keep track of the destination
+        }
+      });
+    } catch (logErr) {
+      console.error("[presigned-url] Failed to log upload activity:", logErr);
+    }
+
     return NextResponse.json(data);
   } catch (err: any) {
     console.error('[presigned-url] error:', err);

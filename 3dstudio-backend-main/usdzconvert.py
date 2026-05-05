@@ -1,336 +1,162 @@
+import trimesh
+import numpy as np
 import os
 import uuid
-import json
 import zipfile
+import sys
+import json
+import traceback
 import shutil
-import boto3
-import io
-import numpy as np
-from PIL import Image
-import trimesh
-import dracox
+import requests
 
-# --- THE CRITICAL FIX ---
-# Manually inject dracox into trimesh's GLTF exchange
-trimesh.exchange.gltf.draco = dracox
-# ------------------------
+# Reference Draco Injection
+try:
+    import dracox
+    trimesh.exchange.gltf.draco = dracox
+except: pass
 
-# ------------------------------------------------------------------ CONFIG ---
-
-S3_BUCKET    = "glb-output"
-S3_FOLDER    = "temp"
-REGION       = "ap-south-1"
-
-BACKEND_ROOT = os.path.dirname(os.path.abspath(__file__))
-TMP_DIR      = os.path.join(BACKEND_ROOT, "storage")
-os.makedirs(TMP_DIR, exist_ok=True)
-
-# --------------------------------------------------------------- S3 HELPERS --
-
-def get_s3():
-    return boto3.client("s3", region_name=REGION)
-
-def download_from_s3(s3_key, glb_url=None):
-    """
-    V17 Zero-Failure Bridge:
-    1. Check if s3_key is an absolute local path (bypass S3)
-    2. Try Direct HTTP Download from glb_url (Priority)
-    3. Try probing S3 buckets as final backup
-    """
-    local_path = os.path.join(TMP_DIR, str(uuid.uuid4()) + ".glb")
-
-    # 1. LOCAL DISK CHECK (Absolute Reality Lock)
-    if s3_key:
-        clean_key = s3_key.strip("'\"")
-        # Handle Windows absolute paths or relative storage paths
-        if (":\\" in clean_key or clean_key.startswith("storage\\")) and os.path.exists(clean_key):
-             print(f"DEBUG: V17 Local Lock hit -> {clean_key}")
-             shutil.copy2(clean_key, local_path)
-             return local_path
-        
-        # Fallback: check if it's just the filename in TMP_DIR
-        storage_alt = os.path.join(TMP_DIR, os.path.basename(clean_key))
-        if os.path.exists(storage_alt):
-             print(f"DEBUG: V17 Local Lock hit (alt) -> {storage_alt}")
-             shutil.copy2(storage_alt, local_path)
-             return local_path
-
-    # 2. GLB_URL DOWNLOAD (High Priority)
-    if glb_url and glb_url.startswith("http"):
-        import requests
-        try:
-            print(f"DEBUG: V17 HTTP Fallback -> Downloading from {glb_url[:80]}...")
-            r = requests.get(glb_url, timeout=30, stream=True)
-            r.raise_for_status()
-            with open(local_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print("SUCCESS: URL download successful.")
-            return local_path
-        except Exception as e:
-            print(f"WARNING: V17 URL download failed: {str(e)}")
-
-    # 3. S3 BUCKET PROBE (Final Backup)
-    if s3_key:
-        filename = os.path.basename(s3_key)
-        buckets_to_try = [S3_BUCKET, "tryitproductmodels"]
-        keys_to_try = [s3_key, filename, f"temp/{filename}"]
-        # Sanitization: Remove any paths from S3 keys
-        keys_to_try = [k for k in keys_to_try if k and ":" not in k and "\\" not in k]
-        
-        s3 = get_s3()
-        for bucket in buckets_to_try:
-            for key in keys_to_try:
-                try:
-                    print(f"DEBUG: S3 Probe -> bucket={bucket}, key={key}")
-                    s3.download_file(bucket, key, local_path)
-                    print(f"SUCCESS: Found in bucket={bucket}")
-                    return local_path
-                except: continue
-
-    raise RuntimeError(f"Could not find model file {s3_key} via Local, HTTP, or S3 probe.")
-
-def upload_usdz_to_s3(local_path):
-    s3  = get_s3()
-    key = S3_FOLDER + "/" + str(uuid.uuid4()) + ".usdz"
-    s3.upload_file(
-        local_path, S3_BUCKET, key,
-        ExtraArgs={
-            "ContentType": "model/vnd.usdz+zip",
-            "ContentDisposition": "inline",
-        }
-    )
-    url = s3.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": S3_BUCKET, "Key": key},
-        ExpiresIn=3600,
-    )
-    return {"url": url, "key": key}
-
-# --------------------------------------------------------- NATIVE CONVERTER ---
-
-def convert_glb_to_usdz(glb_path):
-    """
-    Absolute Texture Lock (V5): Uses Native Trimesh Engine to extract textures.
-    This bypasses all binary parsing issues with Draco/Basis models.
-    """
-    work_dir = os.path.join(TMP_DIR, str(uuid.uuid4()))
-    tex_dir  = os.path.join(work_dir, "textures")
-    os.makedirs(tex_dir, exist_ok=True)
-    
-    usdz_path = glb_path.replace(".glb", ".usdz")
-    
+def download_from_s3_smart(s3_key):
+    """ V15: High-Performance S3 Linker """
     try:
-        # 1. LOAD MODEL (Native Unlocking)
-        print(f"DEBUG: Native Unlocking {glb_path}...")
-        scene = trimesh.load(glb_path, force='scene', process=True)
+        from s3_utils import download_from_s3
+        return download_from_s3(s3_key)
+    except Exception as e:
+        print(f"DEBUG: S3_Utils import failed in child. Falling back to local check. Error: {e}")
+        tmp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage")
+        clean_key = s3_key.strip("'\"")
+        if os.path.exists(clean_key): return clean_key
+        alt = os.path.join(tmp_dir, os.path.basename(clean_key))
+        if os.path.exists(alt): return alt
+        return s3_key
+
+def convert_glb_to_usdz(input_path, watermark=True):
+    """ V65: Reference Hybrid (Complete Build) """
+    try:
+        # V76: Disable processing to ensure V16 Texture Lock is preserved
+        scene = trimesh.load(input_path, force='scene', process=False)
+        all_v = []
+        for name, geom in scene.geometry.items():
+            if hasattr(geom, 'vertices') and len(geom.vertices) > 0:
+                nodes = [n for n in scene.graph.nodes if scene.graph.get(n)[1] == name]
+                if not nodes: nodes = [name]
+                for node in nodes:
+                    try:
+                        t = scene.graph.get(node)[0]
+                        all_v.append(trimesh.transform_points(geom.vertices, t))
+                    except: all_v.append(geom.vertices)
+        if not all_v: raise RuntimeError("No geometry")
+        all_v_stacked = np.vstack(all_v)
+        rmin, rmax = all_v_stacked.min(axis=0), all_v_stacked.max(axis=0)
+        ext = rmax - rmin
+        scale = 100.0 if np.max(ext) < 5.0 else 1.0
+        cx, cz, gy = (rmax[0]+rmin[0])/2.0, (rmax[2]+rmin[2])/2.0, rmin[1]
         
-        # SAFETY CHECK: Ensure scene is valid
-        if scene is None or len(scene.geometry) == 0:
-            raise RuntimeError(f"Failed to load 3D model from {glb_path}. File might be empty or corrupted.")
-            
-        # 2. EXTRACT GEOMETRIES & TEXTURES (The Engine Way)
-        # Use dump(concatenate=False) to get world-safe meshes with their own visuals
+        usda = ['#usda 1.0', '(', '    defaultPrim = "Root"', '    metersPerUnit = 0.01', '    upAxis = "Y"', ')', 'def Xform "Root"', '{']
+        mats_lines = ['    def Scope "Materials"', '    {']
+        geom_lines, temp_files = [], []
         meshes = scene.dump(concatenate=False)
-        
-        if meshes is None:
-            raise RuntimeError("Geometry extraction (dump) failed. No meshes found in the scene.")
-        
-        # 3. ANTI-GRAVITY FIX: Calculate floor snap from physical world positions
-        global_min_y = float("inf")
-        for mesh in meshes:
-            if hasattr(mesh, 'vertices') and len(mesh.vertices) > 0:
-                y_min = mesh.vertices[:, 1].min()
-                if y_min < global_min_y:
-                    global_min_y = y_min
-        if global_min_y == float("inf"): global_min_y = 0.0
-        
-        # 4. PREPARE USDA & TEXTURES
-        usda_lines = [
-            '#usda 1.0',
-            '(',
-            '    defaultPrim = "Root"',
-            '    metersPerUnit = 0.01',
-            '    upAxis = "Y"',
-            ')',
-            'def Xform "Root"',
-            '{',
-        ]
-        
-        materials_lines = [ '    def Scope "Materials"', '    {']
-        processed_textures = {} # original_id -> filename
-        processed_materials = set()
-        
         for i, mesh in enumerate(meshes):
-            mesh_name = f"Mesh_{i}"
-            mat_name = f"Mat_{i}"
-            mat_root = f"/Root/Materials/{mat_name}"
-            
-            # Extract Texture for this mesh (V16 Enhanced Audit)
-            tex_filename = None
+            mname, mroot = f"Mat_{i}", f"/Root/Materials/Mat_{i}"
+            tex_fn = None
             if hasattr(mesh.visual, 'material'):
                 mat = mesh.visual.material
-                img = None
-                
-                # Try standard trimesh PBR lookups
-                if hasattr(mat, 'baseColorTexture') and mat.baseColorTexture is not None:
-                    img = mat.baseColorTexture
-                elif hasattr(mat, 'image') and mat.image is not None:
-                    img = mat.image
-                
-                # V16: Deep Audit - Check if it's a PBRMaterial with internal dicts
-                if img is None and hasattr(mat, 'to_color'):
-                    # Some materials mask their textures in sub-properties
-                    try:
-                        if hasattr(mat, 'main_texture'):
-                             img = mat.main_texture
-                    except: pass
-                
-                if img is not None:
-                    img_id = id(img)
-                    if img_id not in processed_textures:
-                        fname = f"texture_{len(processed_textures)}.png"
-                        fpath = os.path.join(tex_dir, fname)
-                        img.save(fpath, "PNG")
-                        processed_textures[img_id] = fname
-                        print(f"DEBUG: V16 Audit -> Mesh '{mesh_name}' texture SAVED as {fname}")
-                    tex_filename = processed_textures[img_id]
-                else:
-                    print(f"DEBUG: V16 Audit -> Mesh '{mesh_name}' HAS NO TEXTURE (using fallback)")
-
-            # Physical Geometry Calculation
-            pts_list = [f"({round(v[0]*100.0, 6)}, {round((v[1]-global_min_y)*100.0, 6)}, {round(v[2]*100.0, 6)})" for v in mesh.vertices]
-            indices = mesh.faces.flatten()
-            idx_str = ", ".join(map(str, indices))
-            fvc_str = ", ".join(["3"] * len(mesh.faces))
-            
-            usda_lines += [
-                f'    def Mesh "{mesh_name}"',
-                '    {',
-                f'        int[] faceVertexCounts = [{fvc_str}]',
-                f'        int[] faceVertexIndices = [{idx_str}]',
-                f'        point3f[] points = [{", ".join(pts_list)}]',
+                img = next((getattr(mat, a) for a in ['baseColorTexture','image','diffuseTexture'] if getattr(mat, a)), None)
+                if img:
+                    tex_fn = f"tex_{i}_{str(uuid.uuid4())[:8]}.png"
+                    save_p = os.path.join(os.path.dirname(input_path), tex_fn)
+                    img.convert('RGBA').save(save_p); temp_files.append(save_p)
+            mats_lines += [f'        def Material "{mname}"', '        {', f'            token outputs:surface.connect = <{mroot}/PBR.outputs:surface>', '            def Shader "PBR"', '            {', '                uniform token info:id = "UsdPreviewSurface"', '                color3f inputs:diffuseColor = (1, 1, 1)', '                float inputs:opacity = 1.0', '                token outputs:surface']
+            if tex_fn: mats_lines += [f'                color3f inputs:diffuseColor.connect = <{mroot}/Tex.outputs:rgb>']
+            mats_lines += ['            }']
+            if tex_fn:
+                mats_lines += ['            def Shader "TexCoords"', '            {', '                uniform token info:id = "UsdPrimvarReader_float2"', '                token inputs:varname = "st"', '                float2 outputs:result', '            }', '            def Shader "Tex"', '            {', '                uniform token info:id = "UsdUVTexture"', f'                asset inputs:file = @textures/{tex_fn}@', f'                float2 inputs:st.connect = <{mroot}/TexCoords.outputs:result>', '                float3 outputs:rgb', '            }']
+            mats_lines += ['        }']
+            v_fin = (mesh.vertices * scale) - [cx*scale, gy*scale, cz*scale]
+            pts = [f"({v[0]:.4f},{v[1]:.4f},{v[2]:.4f})" for v in v_fin]
+            idx = mesh.faces.flatten().tolist()
+            geom_lines += [f'    def Mesh "Mesh_{i}"', '    {', f'        int[] faceVertexCounts = [{", ".join(["3"]*len(mesh.faces))}]', '        int[] faceVertexIndices = [']
+            for k in range(0, len(idx), 20): geom_lines += [f'            {", ".join(map(str, idx[k:k+20]))},']
+            geom_lines += ['        ]', '        point3f[] points = [']
+            for k in range(0, len(pts), 5): geom_lines += [f'            {", ".join(pts[k:k+5])},']
+            geom_lines += ['        ]']
+            if hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None:
+                uvs = [f"({u:.4f},{1.0-v:.4f})" for u, v in mesh.visual.uv[mesh.faces.flatten()]]
+                geom_lines += ['        texCoord2f[] primvars:st = [']
+                for k in range(0, len(uvs), 10): geom_lines += [f'            {", ".join(uvs[k:k+10])},']
+                geom_lines += ['        ] (interpolation = "faceVarying")']
+            geom_lines += [f'        rel material:binding = <{mroot}>', '    }']
+        if watermark:
+            wm_root = "/Root/Materials/WatermarkMat"
+            mats_lines += [
+                f'        def Material "WatermarkMat"',
+                '        {',
+                f'            token outputs:surface.connect = <{wm_root}/PBR.outputs:surface>',
+                '            def Shader "PBR"',
+                '            {',
+                '                uniform token info:id = "UsdPreviewSurface"',
+                f'                color3f inputs:diffuseColor.connect = <{wm_root}/Tex.outputs:rgb>',
+                f'                float inputs:opacity.connect = <{wm_root}/Tex.outputs:a>',
+                '                float inputs:opacityThreshold = 0.1',
+                '                token outputs:surface',
+                '            }',
+                '            def Shader "TexCoords"',
+                '            {',
+                '                uniform token info:id = "UsdPrimvarReader_float2"',
+                '                token inputs:varname = "st"',
+                '                float2 outputs:result',
+                '            }',
+                '            def Shader "Tex"',
+                '            {',
+                '                uniform token info:id = "UsdUVTexture"',
+                '                asset inputs:file = @watermark_tiled.png@',
+                f'                float2 inputs:st.connect = <{wm_root}/TexCoords.outputs:result>',
+                '                float3 outputs:rgb',
+                '                float outputs:a',
+                '            }',
+                '        }'
             ]
             
-            # Normals
-            if hasattr(mesh, 'vertex_normals'):
-                nrm_list = [f"({round(n[0],6)}, {round(n[1],6)}, {round(n[2],6)})" for n in mesh.vertex_normals]
-                usda_lines += [
-                    f'        normal3f[] normals = [{", ".join(nrm_list)}] (',
-                    '            interpolation = "vertex"',
-                    '        )',
-                ]
+            # Dynamic bounds for USDZ watermark (1 unit = 1cm if metersPerUnit=0.01)
+            # Expand watermark to 3x footprint
+            hw = max((ext[0] * scale) * 1.5, 100.0) # 100cm min
+            hd = max((ext[2] * scale) * 1.5, 100.0) # 100cm min
+            wm_pts = [f"({-hw:,.2f},-0.20,{hd:,.2f})", f"({hw:,.2f},-0.20,{hd:,.2f})", f"({hw:,.2f},-0.20,{-hd:,.2f})", f"({-hw:,.2f},-0.20,{-hd:,.2f})"]
+            u_tile, v_tile = max((2*hw) / 50.0, 1.0), max((2*hd) / 50.0, 1.0) # 1 tile per 50cm
             
-            # UVs (V15 FIX: Use faceVarying for maximum compatibility)
-            if hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None:
-                # We map vertex UVs to face corners
-                uv_data = mesh.visual.uv
-                face_uvs = []
-                for face in mesh.faces:
-                    for v_idx in face:
-                        u, v = uv_data[v_idx]
-                        face_uvs.append(f"({round(u,6)}, {round(1.0 - v,6)})")
-                
-                usda_lines += [
-                    f'        texCoord2f[] primvars:st = [{", ".join(face_uvs)}] (',
-                    '            interpolation = "faceVarying"',
-                    '        )',
-                ]
-
-            if tex_filename:
-                usda_lines.append(f'        rel material:binding = <{mat_root}>')
-                
-                if mat_name not in processed_materials:
-                    processed_materials.add(mat_name)
-                    tex_arc = f"textures/{tex_filename}"
-                    materials_lines += [
-                        f'        def Material "{mat_name}"',
-                        '        {',
-                        f'            token outputs:surface.connect = <{mat_root}/PBR.outputs:surface>',
-                        '            def Shader "PBR"',
-                        '            {',
-                        '                uniform token info:id = "UsdPreviewSurface"',
-                        f'                color3f inputs:diffuseColor.connect = <{mat_root}/Tex.outputs:rgb>',
-                        '                float inputs:roughness = 0.4',
-                        '                float inputs:metallic = 0.1',
-                        '                token outputs:surface',
-                        '            }',
-                        '            def Shader "TexCoords"',
-                        '            {',
-                        '                uniform token info:id = "UsdPrimvarReader_float2"',
-                        '                token inputs:varname = "st"',
-                        '                float2 outputs:result',
-                        '            }',
-                        '            def Shader "Tex"',
-                        '            {',
-                        '                uniform token info:id = "UsdUVTexture"',
-                        f'                asset inputs:file = @{tex_arc}@',
-                        f'                float2 inputs:st.connect = <{mat_root}/TexCoords.outputs:result>',
-                        '                float3 outputs:rgb',
-                        '            }',
-                        '        }',
-                    ]
-            else:
-                # Fallback Material (Silver/Grey)
-                usda_lines.append(f'        rel material:binding = <{mat_root}>')
-                if mat_name not in processed_materials:
-                    processed_materials.add(mat_name)
-                    materials_lines += [
-                        f'        def Material "{mat_name}"',
-                        '        {',
-                        f'            token outputs:surface.connect = <{mat_root}/PBR.outputs:surface>',
-                        '            def Shader "PBR"',
-                        '            {',
-                        '                uniform token info:id = "UsdPreviewSurface"',
-                        '                color3f inputs:diffuseColor = (0.8, 0.8, 0.8)',
-                        '                float inputs:roughness = 0.3',
-                        '                float inputs:metallic = 0.5',
-                        '                token outputs:surface',
-                        '            }',
-                        '        }',
-                    ]
-            
-            usda_lines.append('    }')
-
-        materials_lines.append('    }')
-        usda_lines += materials_lines
-        usda_lines += ['}', '']
-        
-        # 5. SAVE USDA
-        usda_path = os.path.join(work_dir, "model.usda")
-        with open(usda_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(usda_lines))
-            
-        # 6. PACKAGE USDZ
-        with zipfile.ZipFile(usdz_path, "w", compression=zipfile.ZIP_STORED) as zf:
-            zf.write(usda_path, arcname="model.usda")
-            for fname in os.listdir(tex_dir):
-                zf.write(os.path.join(tex_dir, fname), arcname=f"textures/{fname}")
-                
-        print(f"DEBUG: USDZ created successfully at {usdz_path}")
-        return usdz_path
-        
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-# ------------------------------------------------------------- SYNC WRAPPER ---
-
-def convert_s3_glb_to_usdz(s3_key, glb_url=None):
-    try:
-        glb_path  = download_from_s3(s3_key, glb_url)
-        usdz_path = convert_glb_to_usdz(glb_path)
-        s3_data   = upload_usdz_to_s3(usdz_path)
-        
-        try: os.remove(glb_path)
+            geom_lines += [
+                '    def Mesh "WatermarkFloor"',
+                '    {',
+                '        int[] faceVertexCounts = [4]',
+                '        int[] faceVertexIndices = [0, 3, 2, 1]',
+                f'        point3f[] points = [{", ".join(wm_pts)}]',
+                f'        texCoord2f[] primvars:st = [(0,0), ({u_tile:.1f},0), ({u_tile:.1f},{v_tile:.1f}), (0,{v_tile:.1f})] (interpolation = "faceVarying")',
+                f'        rel material:binding = <{wm_root}>',
+                '    }'
+            ]
+        usda += geom_lines + mats_lines + ['    }', '}']
+        usda_p = input_path.replace(".glb", ".usda")
+        with open(usda_p, 'w') as f: f.write("\n".join(usda))
+        out_z = input_path.replace(".glb", ".usdz")
+        with zipfile.ZipFile(out_z, 'w', zipfile.ZIP_STORED) as zf:
+            zf.write(usda_p, os.path.basename(usda_p))
+            wm_img = os.path.join(os.path.dirname(__file__), "watermark_tiled.png")
+            if os.path.exists(wm_img): zf.write(wm_img, "watermark_tiled.png")
+            for t in temp_files: zf.write(t, "textures/" + os.path.basename(t))
+        try: os.remove(usda_p)
         except: pass
+        return out_z
+    except: traceback.print_exc(); return None
 
-        return {
-            "success":  True,
-            "filename": os.path.basename(usdz_path),
-            "file_url": s3_data["url"],
-            "s3_key":   s3_data["key"],
-        }
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {"success": False, "error": str(e)}
+def convert_s3_glb_to_usdz(glb_p, watermark=True):
+    actual = download_from_s3_smart(glb_p)
+    out = convert_glb_to_usdz(actual, watermark=watermark)
+    if out:
+        fn = os.path.basename(out)
+        return {"success": True, "s3_key": out, "filename": fn, "url": f"http://127.0.0.1:5001/models/{fn}"}
+    return {"success": False, "error": "Failed"}
+
+if __name__ == "__main__":
+    try:
+        data = json.load(sys.stdin)
+        print(json.dumps(convert_s3_glb_to_usdz(data.get("s3_key"), watermark=data.get("watermark", True))))
+    except Exception as e: print(json.dumps({"success": False, "error": str(e)}))

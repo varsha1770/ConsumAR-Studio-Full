@@ -1,5 +1,5 @@
-"use client";
 import { Fragment, useEffect, useRef, useState } from "react";
+import { useSession } from "next-auth/react";
 import { Dialog, Transition } from "@headlessui/react";
 import {
   SparklesIcon,
@@ -61,7 +61,27 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
   const [originalGlbUrl, setOriginalGlbUrl] = useState<string | null>(null);
   const [originalS3Key, setOriginalS3Key] = useState<string | null>(null);
   const [generationStage, setGenerationStage] = useState(0);
+  const [userTier, setUserTier] = useState("NON_LOGGED");
   const generateAbortRef = useRef<AbortController | null>(null);
+  const { data: session } = useSession();
+
+  const saveToLogbook = async (overrides = {}) => {
+    if (!session) return;
+    try {
+      const current = {
+        glbFile: generatedGlbUrl,
+        glbFileKey: generatedS3Key,
+        usdzFile: generatedUsdzUrl,
+        dimensions,
+        dimensionUnit,
+        scaleValue,
+        ...overrides
+      };
+      await axios.post("/api/user-settings", current);
+    } catch (e) {
+      console.error("The Butler failed to update the Logbook:", e);
+    }
+  };
 
   useEffect(() => {
     if (!isGenerating) {
@@ -75,6 +95,20 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
 
     return () => window.clearInterval(id);
   }, [isGenerating]);
+
+  useEffect(() => {
+    const fetchTier = async () => {
+      try {
+        const res = await axios.get("/api/user/limits");
+        if (res.data.success) {
+          setUserTier(res.data.tier);
+        }
+      } catch (err) {
+        console.error("Failed to fetch tier in GenerateModal:", err);
+      }
+    };
+    fetchTier();
+  }, [session]);
 
   // Dimension conversion helper
   const convertDimension = (value: string, fromUnit: string, toUnit: string): string => {
@@ -120,6 +154,44 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
       height: `${converted.height || "0"}${unit}`,
     });
     setDimensionUnit(newUnit);
+  };
+
+  const handleModelDimensionsDetected = (detected: { length: number; height: number; width: number }) => {
+    // Only update if dimensions are currently empty or "0"
+    if (dimensionInputs.length === "" || dimensionInputs.length === "0") {
+      const fmt = (m: number) => {
+        const toMm: Record<string, number> = {
+          millimeters: 1,
+          centimeters: 10,
+          inches: 25.4,
+          feet: 304.8,
+          meters: 1000,
+        };
+        const valInMm = m * 1000;
+        const valInUnit = valInMm / (toMm[dimensionUnit] || 1000);
+        return (Math.round(valInUnit * 100) / 100).toString();
+      };
+
+      const l = fmt(detected.length);
+      const w = fmt(detected.width);
+      const h = fmt(detected.height);
+
+      const unitMap: Record<string, string> = {
+        millimeters: "mm",
+        centimeters: "cm",
+        inches: "in",
+        feet: "ft",
+        meters: "m",
+      };
+      const unit = unitMap[dimensionUnit] || "m";
+
+      setDimensionInputs({ length: l, width: w, height: h });
+      setDimensions({
+        length: `${l}${unit}`,
+        width: `${w}${unit}`,
+        height: `${h}${unit}`,
+      });
+    }
   };
 
   const handleApplyScale = () => {
@@ -240,22 +312,23 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
       setGeneratedS3Key(s3_key || "");
       setGeneratedUsdzUrl(null); // Always reset USDZ state on new GLB
 
-      const length = backendDimensions?.width
+      const lStr = backendDimensions?.width
         ? (Math.round((backendDimensions.width / 0.3048) * 100) / 100).toString()
         : "0";
-      const width = backendDimensions?.depth
+      const wStr = backendDimensions?.depth
         ? (Math.round((backendDimensions.depth / 0.3048) * 100) / 100).toString()
         : "0";
-      const height = backendDimensions?.height
+      const hStr = backendDimensions?.height
         ? (Math.round((backendDimensions.height / 0.3048) * 100) / 100).toString()
         : "0";
 
-      setDimensions({ length: `${length}ft`, width: `${width}ft`, height: `${height}ft` });
-      setDimensionInputs({ length, width, height });
+      const newDims = { length: `${lStr}ft`, width: `${wStr}ft`, height: `${hStr}ft` };
+      setDimensions(newDims);
+      setDimensionInputs({ length: lStr, width: wStr, height: hStr });
       setDimensionUnit("feet");
 
       if (!originalDimensions) {
-        setOriginalDimensions({ length, width, height });
+        setOriginalDimensions({ length: lStr, width: wStr, height: hStr });
         setOriginalDimensionUnit("feet");
         setOriginalGlbUrl(file_url);
         setOriginalS3Key(s3_key || "");
@@ -263,6 +336,14 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
 
       toast.success("3D model generated successfully!", {
         duration: 3000,
+      });
+
+      // THE BUTLER: Save the new generated model to the Logbook
+      saveToLogbook({
+        glbFile: file_url,
+        glbFileKey: s3_key,
+        dimensions: newDims,
+        dimensionUnit: "feet"
       });
 
       setIsGenerating(false);
@@ -493,11 +574,13 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
           inches: "in",
           feet: "ft",
         };
-        formData.append("depth", dimensionInputs.width);
-        formData.append("width", dimensionInputs.length);
-        formData.append("height", dimensionInputs.height);
-        formData.append("unit", unitMap[dimensionUnit] || "m");
+        formData.append('depth', dimensionInputs.width);
+        formData.append('width', dimensionInputs.length);
+        formData.append('height', dimensionInputs.height);
+        formData.append('unit', unitMap[dimensionUnit] || "m");
       }
+      
+      formData.append('tier', userTier);
 
       toast.loading("Resizing 3D model… this may take a moment", {
         id: "resize-toast",
@@ -527,28 +610,36 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
       const trunc = (v: string) =>
         !v ? "0" : (Math.round(parseFloat(v) * 100) / 100).toString();
 
+      let finalL = dimensionInputs.length;
+      let finalW = dimensionInputs.width;
+      let finalH = dimensionInputs.height;
+
       if (resizeMode === "scale") {
         const scale = parseFloat(scaleValue);
-        const newLength = (parseFloat(dimensionInputs.length) || 0) * scale;
-        const newWidth = (parseFloat(dimensionInputs.width) || 0) * scale;
-        const newHeight = (parseFloat(dimensionInputs.height) || 0) * scale;
+        const calcL = (parseFloat(dimensionInputs.length) || 0) * scale;
+        const calcW = (parseFloat(dimensionInputs.width) || 0) * scale;
+        const calcH = (parseFloat(dimensionInputs.height) || 0) * scale;
+        
+        finalL = calcL.toString();
+        finalW = calcW.toString();
+        finalH = calcH.toString();
 
         setDimensions({
-          length: `${trunc(newLength.toString())}${unit}`,
-          width: `${trunc(newWidth.toString())}${unit}`,
-          height: `${trunc(newHeight.toString())}${unit}`,
+          length: `${trunc(finalL)}${unit}`,
+          width: `${trunc(finalW)}${unit}`,
+          height: `${trunc(finalH)}${unit}`,
         });
         setDimensionInputs({
-          length: trunc(newLength.toString()),
-          width: trunc(newWidth.toString()),
-          height: trunc(newHeight.toString()),
+          length: trunc(finalL),
+          width: trunc(finalW),
+          height: trunc(finalH),
         });
         setScaleValue("");
       } else {
         setDimensions({
-          length: `${trunc(dimensionInputs.length)}${unit}`,
-          width: `${trunc(dimensionInputs.width)}${unit}`,
-          height: `${trunc(dimensionInputs.height)}${unit}`,
+          length: `${trunc(finalL)}${unit}`,
+          width: `${trunc(finalW)}${unit}`,
+          height: `${trunc(finalH)}${unit}`,
         });
       }
 
@@ -559,11 +650,21 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
 
       setGeneratedUsdzUrl(null);
 
-      setTimeout(() => {
-        toast.success("Please convert the new resized GLB to USDZ.", {
-          duration: 4000,
-        });
-      }, 500);
+      toast.success("Please convert the new resized GLB to USDZ.", {
+        duration: 4000,
+      });
+
+      // THE BUTLER: Save the resized model to the Logbook
+      saveToLogbook({
+        glbFile: file_url,
+        glbFileKey: s3_key || generatedS3Key,
+        dimensions: {
+          length: `${trunc(finalL)}${unit}`,
+          width: `${trunc(finalW)}${unit}`,
+          height: `${trunc(finalH)}${unit}`
+        },
+        dimensionUnit: dimensionUnit
+      });
 
       setIsResizing(false);
       setShowEditProportions(false);
@@ -902,7 +1003,12 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
                       <div className="flex-1 flex items-center justify-center">
                         <div className="relative w-full h-[240px] sm:h-[320px] lg:h-[380px] bg-black rounded-lg overflow-hidden shadow-md">
                           {generatedGlbUrl && (
-                            <ModelPreview3D glbUrl={toProxied(generatedGlbUrl)!} dimensions={dimensions} />
+                            <ModelPreview3D 
+                              glbUrl={toProxied(generatedGlbUrl)!} 
+                              dimensions={dimensions} 
+                              onModelDimensionsDetected={handleModelDimensionsDetected}
+                              userTier={userTier}
+                            />
                           )}
                         </div>
                       </div>
@@ -962,9 +1068,16 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
                         <div className="flex flex-col gap-2 w-full max-w-xs">
                           <button
                             type="button"
-                            onClick={() =>
-                              generatedGlbUrl && handleDownload(toProxied(generatedGlbUrl)!, generatedS3Key ? generatedS3Key.split('/').pop() || "model.glb" : "model.glb")
-                            }
+                            onClick={() => {
+                              if (generatedGlbUrl === originalGlbUrl && userTier !== "PAID") {
+                                toast.error("Please click 'Edit proportions' and then 'Apply & Resize' to bake the watermark into your model before downloading.", {
+                                  duration: 5000,
+                                  id: "watermark-warn"
+                                });
+                                return;
+                              }
+                              generatedGlbUrl && handleDownload(toProxied(generatedGlbUrl)!, generatedS3Key ? generatedS3Key.split('/').pop() || "model.glb" : "model.glb");
+                            }}
                             disabled={!generatedGlbUrl}
                             className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-br from-purple-500 to-purple-700 text-white font-semibold text-sm hover:shadow-lg hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
                           >
