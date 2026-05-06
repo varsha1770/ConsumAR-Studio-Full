@@ -125,7 +125,8 @@ args        = json.loads(sys.argv[1])
 dims_before = get_dimensions(args['input_path'])
 resize_glb(args['input_path'], args['output_path'],
            args['target_dims'], mode=args['mode'], axis=args['axis'],
-           watermark=args.get('watermark', False))
+           watermark=args.get('watermark', False),
+           watermark_text=args.get('watermark_text', 'TryitFirstLabs'))
 dims_after  = get_dimensions(args['output_path'])
 
 sys.stdout = _out
@@ -140,7 +141,7 @@ sys.stdout = sys.stderr
 
 from usdzconvert import convert_s3_glb_to_usdz
 args   = json.loads(sys.argv[1])
-result = convert_s3_glb_to_usdz(args['s3_key'])
+result = convert_s3_glb_to_usdz(args['s3_key'], watermark=args.get('watermark', True))
 
 sys.stdout = _out
 print(json.dumps(result))
@@ -309,12 +310,14 @@ def resize_api():
         mode   = data.get("mode",  "non-uniform")
         axis   = data.get("axis",  "y")
         tier   = data.get("tier", "GUEST")
-        force_watermark = data.get("force_watermark", False)
+        # V120: Unified Watermark detection
+        force_watermark = data.get("force_watermark", data.get("watermark", "false"))
+        watermark_text = data.get("watermark_text", "TryitFirstLabs")
         
         # Watermark is ON if Tier is not PAID, or if forced (for Admin testing)
         watermark = (tier.upper() != "PAID") or (str(force_watermark).lower() == "true")
         
-        logger.info(f"!!! TIER CHECK: tier={tier}, forced={force_watermark} => watermark={watermark} !!!")
+        logger.info(f"!!! WATERMARK STATUS: tier={tier}, forced={force_watermark} => ACTIVE={watermark} !!!")
 
         log_request_start(route,
             f"s3_key={s3_key}  target={width}x{height}x{depth} {unit}  mode={mode}")
@@ -357,7 +360,8 @@ def resize_api():
             "target_dims": target_dims,
             "mode":        mode,
             "axis":        axis,
-            "watermark":   watermark
+            "watermark":   watermark,
+            "watermark_text": watermark_text
         }, timeout=120)
 
         result, err = _child_result(proc, stdout, stderr, route)
@@ -376,7 +380,7 @@ def resize_api():
 
         # V12: Absolute Reality Lock - Return Full Path as file_key
         local_filename = os.path.basename(output_path)
-        local_url = f"http://localhost:5001/models/{local_filename}"
+        local_url = f"http://localhost:5002/models/{local_filename}"
         
         # We now use the ABSOLUTE PATH as the key so the USDZ script finds it 100%
         file_key = output_path 
@@ -431,10 +435,11 @@ def convert_usdz_api():
         if not s3_key:
             return jsonify({"error": "No s3_key provided"}), 400
 
-        # V13: SMART RECOVERY - The child script will handle filename extraction
-        # so we just pass the key as-is.
+        # captures watermark toggle from frontend (V86)
+        watermark_flag = data.get("watermark", "true").lower() == "true"
+        
         proc, stdout, stderr = _run_child(
-            _SCRIPT_CONVERT_USDZ, {"s3_key": s3_key}, timeout=180
+            _SCRIPT_CONVERT_USDZ, {"s3_key": s3_key, "watermark": watermark_flag}, timeout=180
         )
         result, err = _child_result(proc, stdout, stderr, route)
 
@@ -476,6 +481,6 @@ if __name__ == "__main__":
     CORS(app, origins=ALLOWED_ORIGINS)
 
     logger.info(f"Allowed CORS origins: {ALLOWED_ORIGINS}")
-    logger.info("Server listening on 0.0.0.0:5001")
+    logger.info("Server listening on 0.0.0.0:5002")
 
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    app.run(host="0.0.0.0", port=5002, debug=True)

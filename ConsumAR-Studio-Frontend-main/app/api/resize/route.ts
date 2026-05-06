@@ -5,7 +5,7 @@ import prisma from "@/lib/prisma";
 
 export const maxDuration = 300; // 5 minutes (requires Vercel Pro, but prevents Next.js hard timeouts)
 
-const EC2_RESIZE_URL = process.env.EC2_RESIZE_URL;
+const EC2_RESIZE_URL = "http://localhost:5002/resize";
 const PRESIGNED_URL_SERVICE = process.env.PRESIGNED_URL_SERVICE!;
 const GLB_OUTPUT_BUCKET = 'glb-output';
 
@@ -82,7 +82,7 @@ export async function POST(request: Request) {
         maxRescalesMonth = 999999;
       } else if (userTier === "PAID") {
         maxRescales = 20;
-        maxRescalesMonth = 999999;
+        maxRescalesMonth = 250;
       } else if (userTier === "FREE") {
         maxRescales = 3;
         maxRescalesMonth = 60;
@@ -93,6 +93,11 @@ export async function POST(request: Request) {
     const userEmail = session?.user?.email || null;
     const todayStr = startOfDay.toISOString();
     const monthStr = startOfMonth.toISOString();
+
+    const incomingForm = await request.formData();
+    const requestId = Math.random().toString(36).substring(7);
+    console.log(`[resize][${requestId}] Request started`);
+    const isAutoWatermark = incomingForm.get('auto_watermark') === 'true';
 
     const rescaleResults: any[] = await prisma.$queryRawUnsafe(`
       SELECT COUNT(*)::int as count 
@@ -120,16 +125,12 @@ export async function POST(request: Request) {
       rescalesUsedMonth = monthResults[0]?.count || 0;
     }
 
-    if (rescalesUsed >= maxRescales || rescalesUsedMonth >= maxRescalesMonth) {
+    if (!isAutoWatermark && (rescalesUsed >= maxRescales || rescalesUsedMonth >= maxRescalesMonth)) {
       const errorMsg = rescalesUsedMonth >= maxRescalesMonth 
         ? "Monthly limit reached. Upgrade to Pro for unlimited."
         : "Daily limit reached. Please upgrade to Pro. (Note: Account wipes do not reset daily limits)";
       return NextResponse.json({ success: false, error: errorMsg }, { status: 403 });
     }
-
-    const incomingForm = await request.formData();
-    const requestId = Math.random().toString(36).substring(7);
-    console.log(`[resize][${requestId}] Request started`);
     
     // Check if we are receiving a direct file (Tunnel Mode)
     const file = incomingForm.get('file') as File | null;
@@ -157,8 +158,7 @@ export async function POST(request: Request) {
       if (force_watermark) pythonForm.append('force_watermark', force_watermark);
 
       // Forward to Python backend (bypass browser CORS/404)
-      const PYTHON_RESIZE_URL = "http://localhost:5001/resize";
-      const pythonRes = await fetch(PYTHON_RESIZE_URL, {
+      const pythonRes = await fetch(EC2_RESIZE_URL!, {
         method: 'POST',
         body: pythonForm,
       });
@@ -171,16 +171,18 @@ export async function POST(request: Request) {
       const data = await pythonRes.json();
 
       // LOG ACTIVITY (Tunnel Mode)
-      try {
-        const activityEmail = session?.user?.email || (userId ? (await (prisma.user as any).findUnique({ where: { id: userId }}))?.email : null);
-        
-        await prisma.$executeRawUnsafe(`
-          INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile", "createdAt")
-          VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, NOW())
-        `, Math.random().toString(36).substring(7), userId || null, activityEmail || null, ip, "RESCALE", file.name || "model.glb", data.glb_url);
-        console.log(`[resize][${requestId}] Tunnel Mode Activity logged for: ${activityEmail}`);
-      } catch (logErr) {
-        console.warn("[resize] Failed to log activity in tunnel mode:", logErr);
+      if (!isAutoWatermark) {
+        try {
+          const activityEmail = session?.user?.email || (userId ? (await (prisma.user as any).findUnique({ where: { id: userId }}))?.email : null);
+          
+          await prisma.$executeRawUnsafe(`
+            INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile")
+            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
+          `, Math.random().toString(36).substring(7), userId || null, activityEmail || null, ip, "RESCALE", file.name || "model.glb", data.glb_url);
+          console.log(`[resize][${requestId}] Tunnel Mode Activity logged for: ${activityEmail}`);
+        } catch (logErr) {
+          console.warn("[resize] Failed to log activity in tunnel mode:", logErr);
+        }
       }
 
       const updatedUsage = await getUsage(userId, ip, session?.user?.email);
@@ -259,8 +261,8 @@ export async function POST(request: Request) {
       }
       
       await prisma.$executeRawUnsafe(`
-          INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile", "createdAt")
-          VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, NOW())
+          INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile")
+          VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
       `, Math.random().toString(36).substring(7), userId || null, activityEmail || null, ip, "RESCALE", s3KeyStr.split('/').pop() || "Resized Model", data.glb_url);
       console.log(`[resize] Activity logged for: ${activityEmail}`);
     } catch (logErr) {
@@ -340,16 +342,22 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
       maxUsdz = 2; maxUsdzMonth = 15;
       maxUploads = 10; 
     }
-    else if (tier === "PAID") { maxRescales = 20; maxRescalesMonth = 999999; maxUsdz = 999999; maxUsdzMonth = 999999; maxUploads = 999999; }
+    else if (tier === "PAID") { maxRescales = 20; maxRescalesMonth = 250; maxUsdz = 999999; maxUsdzMonth = 999999; maxUploads = 100; }
   }
 
-  const baseWhereSql = `
-    AND (
-      "userId" = $1::uuid OR 
-      "userEmail" = $2 OR 
-      ("userId" IS NULL AND "ipAddress" = $3)
-    )
-  `;
+  let baseWhereSql = "";
+  if (userId || userEmail) {
+    baseWhereSql = `
+      AND (
+        "userId" = $1::uuid OR 
+        "userEmail" = $2
+      )
+    `;
+  } else {
+    baseWhereSql = `
+      AND ("userId" IS NULL AND "ipAddress" = $3)
+    `;
+  }
 
   const rescaleResults: any[] = await prisma.$queryRawUnsafe(`
     SELECT COUNT(*)::int as count FROM activities WHERE type = 'RESCALE' AND "createdAt" >= $4::timestamp ${baseWhereSql}

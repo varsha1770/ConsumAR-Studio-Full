@@ -200,8 +200,8 @@ export async function POST(request: Request) {
           const activityEmail = session?.user?.email || (userId ? (await (prisma.user as any).findUnique({ where: { id: userId }}))?.email : null);
 
           await prisma.$executeRawUnsafe(`
-            INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile", "usdzFile", "createdAt")
-            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, NOW())
+            INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile", "usdzFile")
+            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8)
           `, Math.random().toString(36).substring(7), userId, activityEmail || null, ip, "USDZ_CONVERT", finalFileName.endsWith('.usdz') ? finalFileName : `${finalFileName}.usdz`, glb_url as string, data.file_url);
           console.log(`[convert-usdz] Activity record created for: ${activityEmail}`);
         } catch (aErr) {
@@ -213,8 +213,8 @@ export async function POST(request: Request) {
         const finalFileName = s3KeyStr.split('/').pop() || "Converted Model";
         try {
           await prisma.$executeRawUnsafe(`
-            INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile", "usdzFile", "createdAt")
-            VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, NOW())
+            INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile", "usdzFile")
+            VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6)
           `, Math.random().toString(36).substring(7), ip, "USDZ_CONVERT", finalFileName.endsWith('.usdz') ? finalFileName : `${finalFileName}.usdz`, glb_url as string, data.file_url);
           console.log("[convert-usdz] Anonymous activity record created (Raw SQL).");
         } catch (aErr) {
@@ -302,16 +302,22 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
       maxUsdz = 2; maxUsdzMonth = 15;
       maxUploads = 10; 
     }
-    else if (tier === "PAID") { maxRescales = 20; maxRescalesMonth = 999999; maxUsdz = 999999; maxUsdzMonth = 999999; maxUploads = 999999; }
+    else if (tier === "PAID") { maxRescales = 20; maxRescalesMonth = 250; maxUsdz = 999999; maxUsdzMonth = 999999; maxUploads = 100; }
   }
 
-  const baseWhereSql = `
-    AND (
-      "userId" = $1::uuid OR 
-      "userEmail" = $2 OR 
-      ("userId" IS NULL AND "ipAddress" = $3)
-    )
-  `;
+  let baseWhereSql = "";
+  if (userId || userEmail) {
+    baseWhereSql = `
+      AND (
+        "userId" = $1::uuid OR 
+        "userEmail" = $2
+      )
+    `;
+  } else {
+    baseWhereSql = `
+      AND ("userId" IS NULL AND "ipAddress" = $3)
+    `;
+  }
 
   const rescaleResults: any[] = await prisma.$queryRawUnsafe(`
     SELECT COUNT(*)::int as count FROM activities WHERE type = 'RESCALE' AND "createdAt" >= $4::timestamp ${baseWhereSql}

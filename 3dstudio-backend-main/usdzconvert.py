@@ -117,19 +117,29 @@ def convert_glb_to_usdz(input_path, watermark=True):
             ]
             
             # Dynamic bounds for USDZ watermark (1 unit = 1cm if metersPerUnit=0.01)
-            # Expand watermark to 3x footprint
-            hw = max((ext[0] * scale) * 1.5, 100.0) # 100cm min
-            hd = max((ext[2] * scale) * 1.5, 100.0) # 100cm min
-            wm_pts = [f"({-hw:,.2f},-0.20,{hd:,.2f})", f"({hw:,.2f},-0.20,{hd:,.2f})", f"({hw:,.2f},-0.20,{-hd:,.2f})", f"({-hw:,.2f},-0.20,{-hd:,.2f})"]
-            u_tile, v_tile = max((2*hw) / 50.0, 1.0), max((2*hd) / 50.0, 1.0) # 1 tile per 50cm
+            # V129: Horizontal Ground-Plane for USDZ
+            hw = max((ext[0] * scale) * 1.5, 100.0) 
+            hd = max((ext[2] * scale) * 1.5, 100.0)
+            # Position at the bottom (rmin[1]) with a -1cm offset to prevent z-fighting
+            by = (rmin[1] * scale) - 1.0 
+            
+            # Horizontal floor plane coordinates (facing up towards +Y)
+            # Points: Front-Left, Front-Right, Back-Right, Back-Left
+            wm_pts = [
+                f"({-hw:,.2f},{by:,.2f},{hd:,.2f})", 
+                f"({hw:,.2f},{by:,.2f},{hd:,.2f})", 
+                f"({hw:,.2f},{by:,.2f},{-hd:,.2f})", 
+                f"({-hw:,.2f},{by:,.2f},{-hd:,.2f})"
+            ]
+            u_tile, v_tile = 1.0, 1.0 # Single tile (watermark_tiled.png is already tiled)
             
             geom_lines += [
-                '    def Mesh "WatermarkFloor"',
+                '    def Mesh "WatermarkBack"',
                 '    {',
                 '        int[] faceVertexCounts = [4]',
-                '        int[] faceVertexIndices = [0, 3, 2, 1]',
+                '        int[] faceVertexIndices = [0, 1, 2, 3]',
                 f'        point3f[] points = [{", ".join(wm_pts)}]',
-                f'        texCoord2f[] primvars:st = [(0,0), ({u_tile:.1f},0), ({u_tile:.1f},{v_tile:.1f}), (0,{v_tile:.1f})] (interpolation = "faceVarying")',
+                f'        texCoord2f[] primvars:st = [(0,0), (1,0), (1,1), (0,1)] (interpolation = "faceVarying")',
                 f'        rel material:binding = <{wm_root}>',
                 '    }'
             ]
@@ -152,7 +162,7 @@ def convert_s3_glb_to_usdz(glb_p, watermark=True):
     out = convert_glb_to_usdz(actual, watermark=watermark)
     if out:
         fn = os.path.basename(out)
-        return {"success": True, "s3_key": out, "filename": fn, "url": f"http://127.0.0.1:5001/models/{fn}"}
+        return {"success": True, "s3_key": out, "filename": fn, "url": f"http://127.0.0.1:5002/models/{fn}"}
     return {"success": False, "error": "Failed"}
 
 if __name__ == "__main__":

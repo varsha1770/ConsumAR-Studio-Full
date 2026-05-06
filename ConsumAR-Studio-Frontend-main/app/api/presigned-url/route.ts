@@ -40,7 +40,7 @@ export async function GET(request: NextRequest) {
       maxUploads = 999999;
       prefix = `admin/${userId}/`;
     } else if (tier === "PAID") {
-      maxUploads = 999999;
+      maxUploads = 100;
       prefix = `paid/${userId}/`;
     } else if (tier === "FREE") {
       maxUploads = 10;

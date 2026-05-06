@@ -19,7 +19,7 @@ interface EditorControlsProps {
   isResizing: boolean;
   glbFileKey: string | null;
   glbFile: string | null;
-  handleApply: () => void;
+  handleApply: (forceWatermarkOverride?: boolean) => void;
   handleReset: () => void;
   handleDownload: (url: string, name: string, draco?: boolean) => void;
   handleConvert: () => void;
@@ -30,6 +30,8 @@ interface EditorControlsProps {
   rawModelDimensions: any;
   forceWatermark: boolean;
   setForceWatermark: (val: boolean) => void;
+  watermarkText: string;
+  setWatermarkText: (val: string) => void;
 }
 
 export default function EditorControls({
@@ -60,7 +62,9 @@ export default function EditorControls({
   originalDimensionUnit,
   rawModelDimensions,
   forceWatermark,
-  setForceWatermark
+  setForceWatermark,
+  watermarkText,
+  setWatermarkText
 }: EditorControlsProps) {
   return (
     <div className="w-full lg:w-[350px] flex flex-col space-y-4">
@@ -108,12 +112,10 @@ export default function EditorControls({
           <label className="text-xs font-semibold text-gray-700">Target Dimensions</label>
           <div className="grid grid-cols-3 gap-2">
             {["length", "width", "height"].map(dim => {
-              const axisMap: Record<string, string> = { length: "X", width: "Z", height: "Y" };
                 const val = dimensionInputs[dim as keyof typeof dimensionInputs];
                 const s = parseFloat(scaleValue) || 1.0;
                 const toMm: Record<string, number> = { millimeters: 1, centimeters: 10, inches: 25.4, feet: 304.8, meters: 1000 };
                 
-                // V53: Back to Stable Original base (prevents 0.03 glitches)
                 const origVal = parseFloat(originalDimensions?.[dim]) || 0;
                 const origUnit = "meters"; 
                 const valInMm = origVal * (toMm[origUnit] || 304.8);
@@ -156,7 +158,11 @@ export default function EditorControls({
               <input 
                 type="checkbox" 
                 checked={forceWatermark} 
-                onChange={(e) => setForceWatermark(e.target.checked)} 
+                onChange={(e) => {
+                  setForceWatermark(e.target.checked);
+                  // V129: Auto-Apply Branding on Toggle (Direct Override)
+                  setTimeout(() => handleApply(e.target.checked), 100);
+                }} 
                 className="sr-only peer" 
               />
               <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
@@ -164,35 +170,48 @@ export default function EditorControls({
           </div>
         )}
 
+        {isSuperAdmin && forceWatermark && (
+          <div className="mt-2 p-3 bg-white rounded-xl border border-indigo-100 shadow-sm animate-in fade-in slide-in-from-top-2">
+            <span className="text-[10px] font-black text-indigo-400 uppercase block mb-1">Watermark Text</span>
+            <input 
+              type="text"
+              value={watermarkText}
+              onChange={(e) => setWatermarkText(e.target.value)}
+              onBlur={() => handleApply(true)}
+              className="w-full px-3 py-2 text-xs font-bold text-indigo-900 bg-indigo-50/30 border border-indigo-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+              placeholder="Enter watermark text..."
+            />
+          </div>
+        )}
+
         <div className="flex flex-col gap-2 mt-auto">
-          {/* Counter Widget */}
           {usageStats && userTier !== "PAID" && !isSuperAdmin && (
             <div className="w-full bg-white/50 p-2 rounded-lg border border-white/80 shadow-sm mb-2">
               <div className="grid grid-cols-3 gap-x-2 gap-y-1">
                 <div className="flex flex-col items-center border-r border-gray-100/50 pr-1">
                   <span className={`text-[9px] font-bold ${usageStats.uploads >= usageStats.maxUploads ? "text-red-500" : "text-gray-500"}`}>
-                    Uploads: {usageStats.uploads}/{usageStats.maxUploads === 999999 ? '∞' : usageStats.maxUploads}
+                    Uploads: {Math.min(usageStats.uploads, usageStats.maxUploads)} / {usageStats.maxUploads === 999999 ? '∞' : usageStats.maxUploads}
                   </span>
                   <span className="text-[8px] font-bold text-gray-400 opacity-80">
-                    {usageStats.uploadsMonth}/{usageStats.maxUploadsMonth === 999999 ? '∞' : usageStats.maxUploadsMonth} (Month)
+                    {Math.min(usageStats.uploadsMonth, usageStats.maxUploadsMonth)} / {usageStats.maxUploadsMonth === 999999 ? '∞' : usageStats.maxUploadsMonth} (Month)
                   </span>
                 </div>
 
                 <div className="flex flex-col items-center border-r border-gray-100/50 pr-1">
                   <span className={`text-[9px] font-bold ${usageStats.rescales >= usageStats.maxRescales ? "text-red-500" : "text-gray-500"}`}>
-                    Rescales: {usageStats.rescales}/{usageStats.maxRescales === 999999 ? '∞' : usageStats.maxRescales}
+                    Rescales: {Math.min(usageStats.rescales, usageStats.maxRescales)} / {usageStats.maxRescales === 999999 ? '∞' : usageStats.maxRescales}
                   </span>
                   <span className={`text-[8px] font-bold opacity-80 ${usageStats.rescalesMonth >= usageStats.maxRescalesMonth ? "text-red-500" : "text-blue-500"}`}>
-                    {usageStats.rescalesMonth}/{usageStats.maxRescalesMonth === 999999 ? '∞' : usageStats.maxRescalesMonth} (Month)
+                    {Math.min(usageStats.rescalesMonth, usageStats.maxRescalesMonth)} / {usageStats.maxRescalesMonth === 999999 ? '∞' : usageStats.maxRescalesMonth} (Month)
                   </span>
                 </div>
 
                 <div className="flex flex-col items-center">
                   <span className={`text-[9px] font-bold ${usageStats.usdz >= usageStats.maxUsdz ? "text-red-500" : "text-gray-500"}`}>
-                    USDZ: {usageStats.usdz}/{usageStats.maxUsdz === 999999 ? '∞' : usageStats.maxUsdz}
+                    USDZ: {Math.min(usageStats.usdz, usageStats.maxUsdz)} / {usageStats.maxUsdz === 999999 ? '∞' : usageStats.maxUsdz}
                   </span>
                   <span className={`text-[8px] font-bold opacity-80 ${usageStats.usdzMonth >= usageStats.maxUsdzMonth ? "text-red-500" : "text-purple-500"}`}>
-                    {usageStats.usdzMonth}/{usageStats.maxUsdzMonth === 999999 ? '∞' : usageStats.maxUsdzMonth} (Month)
+                    {Math.min(usageStats.usdzMonth, usageStats.maxUsdzMonth)} / {usageStats.maxUsdzMonth === 999999 ? '∞' : usageStats.maxUsdzMonth} (Month)
                   </span>
                 </div>
               </div>
@@ -217,8 +236,20 @@ export default function EditorControls({
             </button>
           </div>
           <div className="flex gap-3">
-            <button onClick={() => handleDownload(toProxied(glbFile)!, "model.glb")} disabled={!glbFile} className="flex-1 py-3 rounded-xl bg-white border border-gray-200 text-gray-600 font-medium text-xs flex items-center justify-center gap-2 hover:bg-gray-50 transition-all"><ArrowDownTrayIcon className="w-3.5 h-3.5" /> GLB</button>
-            <button onClick={() => handleDownload(toProxied(glbFile)!, "model.glb", true)} disabled={!glbFile} className="flex-[2] py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-medium text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] hover:shadow-xl hover:-translate-y-0.5"><ArrowDownTrayIcon className="w-4 h-4" /> Optimize & Download</button>
+            <button onClick={() => {
+              if (!isSuperAdmin && (userTier === "NON_LOGGED" || userTier === "FREE")) {
+                triggerUpgrade("Free and Guest users cannot download 3D models. Please upgrade to Pro to access GLB downloads.");
+                return;
+              }
+              handleDownload(toProxied(glbFile)!, "model.glb");
+            }} disabled={!glbFile} className="flex-1 py-3 rounded-xl bg-white border border-gray-200 text-gray-600 font-medium text-xs flex items-center justify-center gap-2 hover:bg-gray-50 transition-all"><ArrowDownTrayIcon className="w-3.5 h-3.5" /> GLB</button>
+            <button onClick={() => {
+              if (!isSuperAdmin && (userTier === "NON_LOGGED" || userTier === "FREE")) {
+                triggerUpgrade("Free and Guest users cannot download 3D models. Please upgrade to Pro to access GLB downloads.");
+                return;
+              }
+              handleDownload(toProxied(glbFile)!, "model.glb", true);
+            }} disabled={!glbFile} className="flex-[2] py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-medium text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] hover:shadow-xl hover:-translate-y-0.5"><ArrowDownTrayIcon className="w-4 h-4" /> Optimize & Download</button>
           </div>
           <button onClick={() => {
               if (!isSuperAdmin && usageStats && usageStats.usdz >= usageStats.maxUsdz) {

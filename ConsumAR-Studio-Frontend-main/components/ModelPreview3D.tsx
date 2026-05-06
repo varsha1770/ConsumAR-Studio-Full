@@ -103,12 +103,27 @@ export default function ModelPreview3D({
           center = { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
         }
 
-        const min = { x: center.x - size.x / 2, y: center.y - size.y / 2, z: center.z - size.z / 2 };
-        const max = { x: center.x + size.x / 2, y: center.y + size.y / 2, z: center.z + size.z / 2 };
+        const parseDim = (val: any) => {
+          if (typeof val === 'number') return val;
+          const n = parseFloat(val);
+          return isNaN(n) ? 0 : n;
+        };
+        const pL = parseDim(dimensions.length);
+        const pW = parseDim(dimensions.width);
+        const pH = parseDim(dimensions.height);
+
+        // V132: Reference-Based Hotspot Locking
+        // Use server-provided dimensions if they are non-zero (ignores watermark bounds)
+        const finalSize = (pL > 0 && pW > 0 && pH > 0) 
+          ? { x: pL, y: pH, z: pW } 
+          : size;
 
         if (detectCallbackRef.current) {
           detectCallbackRef.current({ length: size.x, height: size.y, width: size.z });
         }
+
+        const min = { x: center.x - finalSize.x / 2, y: center.y - finalSize.y / 2, z: center.z - finalSize.z / 2 };
+        const max = { x: center.x + finalSize.x / 2, y: center.y + finalSize.y / 2, z: center.z + finalSize.z / 2 };
 
         const set = (n: string, p: string) => v.updateHotspot({ name: `hotspot-${n}`, position: p });
         set('hp1', `${min.x} ${max.y} ${min.z}m`);
@@ -128,25 +143,26 @@ export default function ModelPreview3D({
 
     v.addEventListener('load', () => {
        setLoadError(false);
-       run();
+       // V176: Increased delay to ensure model-viewer has updated its internal bounding box
+       setTimeout(run, 200);
     });
     v.addEventListener('error', (e: any) => {
        console.error("[ModelPreview3D] Model failed to load:", e);
        setLoadError(true);
        if (onError) onError();
     });
-    if (v.loaded) run();
+    if (v.loaded) setTimeout(run, 200);
     
     // Interval fallback to ensure detection triggers
     const i = setInterval(() => {
        if (hasDetected.current) clearInterval(i);
        else run();
-    }, 500);
+    }, 1000); 
 
     return () => { 
       clearInterval(i); 
     };
-  }, [glbUrl, JSON.stringify(dimensions)]); // V48: Re-run when dimensions/units change to fix position drift
+  }, [glbUrl, JSON.stringify(dimensions)]); 
 
   if (loadError) {
     return (
@@ -232,16 +248,7 @@ export default function ModelPreview3D({
         )}
       </model-viewer>
 
-      {userTier !== "PAID" && (
-        <div 
-          className="absolute inset-0 pointer-events-none select-none opacity-15 z-[100]"
-          style={{ 
-            backgroundImage: 'url("/water-mark.png")',
-            backgroundRepeat: 'repeat',
-            backgroundSize: '180px 180px', 
-          }}
-        />
-      )}
+      {/* V123: CSS Watermark Force-Removed by User Request */}
       
       <button
         onClick={() => setShowDimensions(!showDimensions)}

@@ -14,6 +14,8 @@ interface ManualUploadProps {
   currentGlbUrl: string | null;
   glbFileName: string | null;
   variant?: "landing" | "sidebar" | "replacer";
+  userTier?: string;
+  isOverUploadLimit?: boolean;
 }
 
 export default function ManualUpload({
@@ -21,11 +23,22 @@ export default function ManualUpload({
   currentGlbUrl,
   glbFileName,
   variant = "sidebar",
+  userTier = "NON_LOGGED",
+  isOverUploadLimit = false,
 }: ManualUploadProps) {
   const [glbUploading, setGlbUploading] = useState(false);
   const [glbProgress, setGlbProgress] = useState(0);
 
   const handleUpload = async (file: File) => {
+    if (isOverUploadLimit) {
+      toast.error(
+        userTier === "NON_LOGGED" 
+          ? "You've used your free guest limit. Sign in to upload more!" 
+          : "Daily upload limit reached. Please upgrade to Pro to upload more."
+      );
+      return;
+    }
+
     setGlbUploading(true);
     setGlbProgress(0);
 
@@ -33,14 +46,6 @@ export default function ManualUpload({
       let fileToUpload = file;
 
       toast.loading("Analyzing geometry format...", { id: `upload-glb-toast`, duration: Infinity });
-      /* 
-      try {
-        const { decompressGLBIfDraco } = await import('../utils/glbCompressor');
-        fileToUpload = await decompressGLBIfDraco(file);
-      } catch (e) {
-        console.error("Failed to execute format check:", e);
-      }
-      */
       console.log("[ManualUpload] Bypassing optimization for stability check.");
 
       // Show loading toast
@@ -74,8 +79,35 @@ export default function ManualUpload({
       const responseUpload = await axios.put(upload_url, fileToUpload, options);
 
       if (responseUpload.statusText === "OK") {
-        const uploadedUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${file_key}`;
-        onGLBUpload(uploadedUrl, file_key, file.name, URL.createObjectURL(fileToUpload));
+        let finalUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${file_key}`;
+        let finalKey = file_key;
+        let finalBlobUrl: string | undefined = URL.createObjectURL(fileToUpload);
+
+        if (userTier === "NON_LOGGED") {
+          toast.loading(`Applying Watermark...`, { id: `upload-glb-toast`, duration: Infinity });
+          try {
+            const fd = new FormData();
+            fd.append('s3_key', finalKey);
+            fd.append('glb_url', finalUrl);
+            fd.append('width', '0');
+            fd.append('height', '0');
+            fd.append('depth', '0');
+            fd.append('unit', 'm');
+            fd.append('auto_watermark', 'true');
+            fd.append('force_watermark', 'true');
+            
+            const apiRes = await axios.post("/api/resize", fd);
+            if (apiRes.data.success) {
+               finalUrl = apiRes.data.glb_url;
+               finalKey = apiRes.data.file_key;
+               finalBlobUrl = undefined; // Force viewer to use the watermarked S3 URL
+            }
+          } catch (e) {
+            console.warn("Auto-watermark failed, continuing with original.");
+          }
+        }
+
+        onGLBUpload(finalUrl, finalKey, file.name, finalBlobUrl);
 
         toast.success(`GLB uploaded successfully!`, {
           id: `upload-glb-toast`,

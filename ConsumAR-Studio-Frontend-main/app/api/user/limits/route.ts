@@ -51,8 +51,7 @@ export async function GET(req: Request) {
           FROM activities
           WHERE (
             "userId" = $1::uuid OR 
-            "userEmail" = $2 OR 
-            ("userId" IS NULL AND "ipAddress" = $3)
+            "userEmail" = $2
           )
           AND "createdAt" >= $5::timestamp
         )

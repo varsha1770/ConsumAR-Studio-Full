@@ -46,8 +46,8 @@ export async function POST() {
 
     // 2. DELETE USER FROM DATABASE (RAW SQL for speed)
     try {
-      // Unlink activities but keep records for the email-lock ledger
-      await prisma.$executeRawUnsafe(`UPDATE activities SET "userId" = NULL WHERE "userId" = $1::uuid`, userId);
+      // DPDP COMPLIANCE: Absolute Purge of all activities
+      await prisma.$executeRawUnsafe(`DELETE FROM activities WHERE "userId" = $1::uuid OR "userEmail" = $2`, userId, userEmail);
       
       // Cascade delete User
       await prisma.$executeRawUnsafe(`DELETE FROM "Users" WHERE id = $1::uuid`, userId);

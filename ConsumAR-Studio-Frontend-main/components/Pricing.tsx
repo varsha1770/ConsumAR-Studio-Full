@@ -44,7 +44,7 @@ const plans = [
       "All Units (MM, CM, M, FT, IN)",
       "10x History Downloads"
     ],
-    cta: "Go Pro Now",
+    cta: "Coming Soon",
     popular: true,
     color: "purple"
   }
@@ -91,7 +91,7 @@ export default function Pricing() {
                 {plan.name}
               </h3>
               <div className="flex items-baseline gap-1">
-                <span className="text-4xl font-semibold text-gray-900">{plan.price === "Custom" ? "Contact" : `$${plan.price}`}</span>
+                <span className="text-4xl font-semibold text-gray-900">{plan.price === "Custom" ? "Coming Soon" : `$${plan.price}`}</span>
                 {plan.price !== "Free" && plan.price !== "Custom" && <span className="text-gray-400 font-medium text-sm">/mo</span>}
               </div>
               <p className="text-gray-400 text-sm mt-2 font-light">{plan.description}</p>

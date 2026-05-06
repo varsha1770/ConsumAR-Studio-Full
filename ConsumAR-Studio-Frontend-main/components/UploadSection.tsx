@@ -50,13 +50,14 @@ export default function UploadSection() {
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [upgradeMessage, setUpgradeMessage] = useState("");
   const [hasLoadError, setHasLoadError] = useState(false);
-  const [hasAutoAppliedBranding, setHasAutoAppliedBranding] = useState(false);
   const [forceWatermark, setForceWatermark] = useState(false);
+  const [watermarkText, setWatermarkText] = useState("TryitFirstLabs");
+  const [previewVersion, setPreviewVersion] = useState(0);
 
   const isSuperAdmin = userTier === "SUPER_ADMIN" || (session?.user as any)?.isAdmin === true;
 
   const triggerUpgrade = (msg?: string) => {
-    if (isSuperAdmin) return; // V54: Super Admin Bypass Lock
+    if (isSuperAdmin) return;
     if (msg) setUpgradeMessage(msg);
     else if (userTier === "NON_LOGGED") setUpgradeMessage("You've used your free guest limit. Note: Deleting models will NOT reset your quota. Join or Sign in to get 3 more rescales!");
     else setUpgradeMessage("Limit Reached! You've used your free daily rescale/conversion allowance. Note: Deleting files does NOT restore your quota. Upgrade to Pro for 250 monthly rescales, unlimited USDZ, and all dimension units!");
@@ -98,11 +99,6 @@ export default function UploadSection() {
             hasLoadedSettings.current = true;
             const isLocalZero = parseFloat(dimensions.length) === 0 && parseFloat(dimensions.width) === 0 && parseFloat(dimensions.height) === 0;
             if (isLocalZero) {
-                /* Temporarily disabling auto-load to fix the "stuck" issue
-                if (s.glbFile) setGlbFile(s.glbFile);
-                if (s.glbFileKey) setGlbFileKey(s.glbFileKey);
-                if (s.glbFileName) setGlbFileName(s.glbFileName);
-                */
                 if (s.dimensions) setDimensions(s.dimensions);
                 if (s.dimensionUnit) setDimensionUnit(s.dimensionUnit);
                 if (s.scaleValue) setScaleValue(s.scaleValue);
@@ -147,7 +143,6 @@ export default function UploadSection() {
   const handleViewerError = () => {
     console.log("[Studio] Viewer reported error. Reverting to upload page...");
     setHasLoadError(true);
-    // Automatically reset after 2 seconds if it's a persistent error
     setTimeout(() => {
        clearBrokenModel();
     }, 2000);
@@ -174,7 +169,6 @@ export default function UploadSection() {
     setDimensions(initialDims);
     setScaleValue("");
     setConvertedUsdzUrl(null);
-    setHasAutoAppliedBranding(false);
     saveSettings({ glbFile: cleanUrl, glbFileKey: fileKey, glbFileName: fileName, dimensions: initialDims, scaleValue: "" });
   };
 
@@ -239,7 +233,7 @@ export default function UploadSection() {
     return { length: `${l.toFixed(2)}${unitSuffix}`, width: `${w.toFixed(2)}${unitSuffix}`, height: `${h.toFixed(2)}${unitSuffix}` };
   }, [resizeMode, scaleValue, dimensionInputs, dimensionUnit, originalDimensions]);
 
-  const handleApply = async () => {
+  const handleApply = async (forceWatermarkOverride?: boolean) => {
     if (!glbFileKey) return;
     const l = parseFloat(liveDimensions.length);
     const w = parseFloat(liveDimensions.width);
@@ -251,9 +245,11 @@ export default function UploadSection() {
     if (!originalDimensions) setOriginalDimensions({ ...dimensionInputs });
     setIsResizing(true);
     try {
-      const currentDims = JSON.stringify({ l, w, h, unit: dimensionUnit });
+      const activeWatermark = forceWatermarkOverride !== undefined ? forceWatermarkOverride : forceWatermark;
+      const currentDims = JSON.stringify({ l, w, h, unit: dimensionUnit, watermark: activeWatermark, text: watermarkText });
+      
       if ((window as any)._lastAppliedDims === currentDims) {
-        toast.success("Dimensions already applied!", { id: "res" });
+        toast.success("Design already applied!", { id: "res" });
         setIsResizing(false);
         return;
       }
@@ -269,8 +265,9 @@ export default function UploadSection() {
       const unitMap: Record<string, string> = { feet: "ft", inches: "in", centimeters: "cm", meters: "m", millimeters: "mm" };
       fd.append('unit', unitMap[dimensionUnit] || "m");
       fd.append('tier', userTier);
-      if (isSuperAdmin && forceWatermark) {
+      if (activeWatermark) {
         fd.append('force_watermark', 'true');
+        fd.append('watermark_text', watermarkText);
       }
       const apiRes = await axios.post("/api/resize", fd, { timeout: 120000, validateStatus: (status) => status < 500 });
       if (apiRes.status === 403) {
@@ -281,10 +278,13 @@ export default function UploadSection() {
       }
       if (apiRes.data.success) {
         console.log("[Studio] Resize Success:", apiRes.data.glb_url);
-        const proxiedUrl = toProxied(apiRes.data.glb_url);
+        // V176: Add cache-busting timestamp and increment version to force component reboot
+        const freshUrl = `${apiRes.data.glb_url}${apiRes.data.glb_url.includes('?') ? '&' : '?'}v=${Date.now()}`;
+        const proxiedUrl = toProxied(freshUrl);
         setLocalGlbUrl(proxiedUrl);
         setGlbFile(proxiedUrl);
         setGlbFileKey(apiRes.data.file_key);
+        setPreviewVersion(v => v + 1);
         (window as any)._lastAppliedDims = currentDims;
         const fmt = (v: number) => (Math.round(v * 100) / 100).toString();
         setDimensionInputs({ length: fmt(l), width: fmt(w), height: fmt(h) });
@@ -344,6 +344,7 @@ export default function UploadSection() {
       const fd = new FormData();
       fd.append("s3_key", glbFileKey);
       fd.append("tier", userTier);
+      fd.append("watermark", forceWatermark ? "true" : "false");
       const isServerUrl = (u: string | null) => !!u && (u.startsWith("http://localhost") || u.startsWith("http://127.0.0.1"));
       const glbUrlToSend = isServerUrl(localGlbUrl) ? localGlbUrl : glbFile;
       if (glbUrlToSend) fd.append("glb_url", glbUrlToSend);
@@ -372,11 +373,7 @@ export default function UploadSection() {
     const isCurrentlyZero = parseFloat(dimensions.length) === 0 && parseFloat(dimensions.width) === 0 && parseFloat(dimensions.height) === 0;
     if (d.length === 0 && d.width === 0 && d.height === 0 && !isCurrentlyZero) return;
     let rawL = d.length; let rawW = d.width; let rawH = d.height;
-    // V67: FORCE RE-SYNC - Never use stale data. Always update to the latest detection.
     setRawModelDimensions({ length: rawL, width: rawW, height: rawH });
-    
-    // V68: CONTINUOUS SYNC - Always update originalDimensions to match current detection
-    // This ensures the sidebar always matches the chair after a resize
     setOriginalDimensions({ length: rawL, width: rawW, height: rawH });
     setOriginalDimensionUnit("meters");
   }, [dimensions]);
@@ -394,21 +391,6 @@ export default function UploadSection() {
     }
   }, [rawModelDimensions, dimensionUnit, dimensionInputs.length]);
 
-  // V60: Auto-Branding Protocol - Apply watermark immediately after upload for non-paid users
-  useEffect(() => {
-    const isOriginal = glbFileKey && originalGlbKey && glbFileKey === originalGlbKey;
-    const canAutoApply = isOriginal && rawModelDimensions && userTier !== "PAID" && !hasAutoAppliedBranding && !isResizing;
-    
-    if (canAutoApply) {
-       console.log("[Studio] Triggering mandatory auto-branding...");
-       setHasAutoAppliedBranding(true);
-       // Small delay to ensure state has settled
-       const t = setTimeout(() => {
-         handleApply();
-       }, 500);
-       return () => clearTimeout(t);
-    }
-  }, [glbFileKey, originalGlbKey, rawModelDimensions, userTier, hasAutoAppliedBranding, isResizing, handleApply]);
 
   if (!glbFile || hasLoadError) {
     return (
@@ -424,7 +406,13 @@ export default function UploadSection() {
              </div>
           </div>
         )}
-        <HeroSection glbFile={glbFile} glbFileName={glbFileName} handleGLBUpload={handleGLBUpload} />
+        <HeroSection 
+          glbFile={glbFile} 
+          glbFileName={glbFileName} 
+          handleGLBUpload={handleGLBUpload} 
+          userTier={userTier} 
+          isOverUploadLimit={!isSuperAdmin && usageStats && usageStats.uploads >= usageStats.maxUploads}
+        />
         <FaqSection />
       </div>
     );
@@ -436,7 +424,7 @@ export default function UploadSection() {
         <div className="flex-1 flex flex-col min-h-[500px] lg:min-h-[500px] relative">
           <div className="flex-1 relative flex flex-col">
             <ModelPreview3D 
-              key={glbFileKey || "no-model"}
+              key={`${glbFileKey || "no-model"}-${previewVersion}`}
               glbUrl={localGlbUrl || toProxied(glbFile)!} 
               dimensions={liveDimensions} 
               onModelDimensionsDetected={handleDetected} 
@@ -448,7 +436,14 @@ export default function UploadSection() {
             />
           </div>
           <div className="absolute -right-5 top-1/2 -translate-y-1/2 z-[3000]">
-            <ManualUpload onGLBUpload={handleGLBUpload} currentGlbUrl={glbFile} glbFileName={glbFileName} variant="replacer" />
+            <ManualUpload 
+              onGLBUpload={handleGLBUpload} 
+              currentGlbUrl={glbFile} 
+              glbFileName={glbFileName} 
+              variant="replacer" 
+              userTier={userTier} 
+              isOverUploadLimit={!isSuperAdmin && usageStats && usageStats.uploads >= usageStats.maxUploads}
+            />
           </div>
           {isResizing && (
             <div className="absolute inset-0 bg-white/40 backdrop-blur-[6px] z-50 flex flex-col items-center justify-center">
@@ -494,6 +489,8 @@ export default function UploadSection() {
           triggerUpgrade={triggerUpgrade}
           forceWatermark={forceWatermark}
           setForceWatermark={setForceWatermark}
+          watermarkText={watermarkText}
+          setWatermarkText={setWatermarkText}
         />
       </div>
 
@@ -519,7 +516,11 @@ export default function UploadSection() {
                </div>
             </div>
             <div className="flex flex-col gap-3">
-              <button onClick={() => { setShowUpgradeModal(false); document.getElementById('pricing')?.scrollIntoView({ behavior: 'smooth' }); }} className="w-full py-3 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold shadow-lg">Upgrade to Pro</button>
+              {userTier === "NON_LOGGED" ? (
+                <button onClick={() => { setShowUpgradeModal(false); router.push('/signup'); }} className="w-full py-3 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold shadow-lg">Sign Up to Continue</button>
+              ) : (
+                <button onClick={() => { setShowUpgradeModal(false); document.getElementById('pricing')?.scrollIntoView({ behavior: 'smooth' }); }} className="w-full py-3 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold shadow-lg">Upgrade to Pro</button>
+              )}
             </div>
           </div>
         </div>

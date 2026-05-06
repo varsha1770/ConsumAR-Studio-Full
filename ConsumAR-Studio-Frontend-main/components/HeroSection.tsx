@@ -5,9 +5,11 @@ interface HeroSectionProps {
   glbFile: string | null;
   glbFileName: string | null;
   handleGLBUpload: (fileUrl: string, fileKey: string, fileName: string, fileBlobUrl?: string) => void;
+  userTier: string;
+  isOverUploadLimit?: boolean;
 }
 
-export default function HeroSection({ glbFile, glbFileName, handleGLBUpload }: HeroSectionProps) {
+export default function HeroSection({ glbFile, glbFileName, handleGLBUpload, userTier, isOverUploadLimit }: HeroSectionProps) {
   return (
     <div className="flex flex-col items-center justify-center min-h-[75vh] px-4 py-12 animate-in fade-in zoom-in-95 duration-1000 ease-out">
       {/* DECORATIVE BACKGROUND BLURS */}
@@ -33,6 +35,8 @@ export default function HeroSection({ glbFile, glbFileName, handleGLBUpload }: H
           currentGlbUrl={glbFile} 
           glbFileName={glbFileName} 
           variant="landing"
+          userTier={userTier}
+          isOverUploadLimit={isOverUploadLimit}
         />
 
         <div className="mt-6 pt-6 border-t border-gray-100/50 flex justify-center gap-8 opacity-80">
