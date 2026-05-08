@@ -308,8 +308,35 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
 
       if (!success || !file_url) throw new Error("No file_url in response");
 
-      setGeneratedGlbUrl(file_url);
-      setGeneratedS3Key(s3_key || "");
+      let finalGlbUrl = file_url;
+      let finalS3Key = s3_key || "";
+
+      if (userTier !== "PAID" && userTier !== "SUPER_ADMIN") {
+        toast.loading("Applying Watermark...", { id: "gen-toast" });
+        try {
+          const fd = new FormData();
+          fd.append('s3_key', finalS3Key);
+          fd.append('glb_url', finalGlbUrl);
+          fd.append('width', '0');
+          fd.append('height', '0');
+          fd.append('depth', '0');
+          fd.append('unit', 'm');
+          fd.append('auto_watermark', 'true');
+          fd.append('force_watermark', 'true');
+          fd.append('tier', userTier);
+
+          const apiRes = await axios.post("/api/resize", fd);
+          if (apiRes.data.success) {
+            finalGlbUrl = apiRes.data.glb_url;
+            finalS3Key = apiRes.data.file_key;
+          }
+        } catch (e) {
+          console.warn("Auto-watermark failed, continuing with original.");
+        }
+      }
+
+      setGeneratedGlbUrl(finalGlbUrl);
+      setGeneratedS3Key(finalS3Key);
       setGeneratedUsdzUrl(null); // Always reset USDZ state on new GLB
 
       const lStr = backendDimensions?.width
@@ -330,8 +357,8 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
       if (!originalDimensions) {
         setOriginalDimensions({ length: lStr, width: wStr, height: hStr });
         setOriginalDimensionUnit("feet");
-        setOriginalGlbUrl(file_url);
-        setOriginalS3Key(s3_key || "");
+        setOriginalGlbUrl(finalGlbUrl);
+        setOriginalS3Key(finalS3Key);
       }
 
       toast.success("3D model generated successfully!", {
@@ -340,8 +367,8 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
 
       // THE BUTLER: Save the new generated model to the Logbook
       saveToLogbook({
-        glbFile: file_url,
-        glbFileKey: s3_key,
+        glbFile: finalGlbUrl,
+        glbFileKey: finalS3Key,
         dimensions: newDims,
         dimensionUnit: "feet"
       });

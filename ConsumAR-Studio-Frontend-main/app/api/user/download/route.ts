@@ -19,48 +19,50 @@ export async function GET(req: Request) {
       return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { tier: true }
-    });
-    
-    const tier = user?.tier || "FREE";
-    const maxDownloads = tier === "PAID" ? 10 : 2;
+    const userId = session.user.id;
+    const userResults: any[] = await prisma.$queryRawUnsafe(`SELECT tier FROM "Users" WHERE id = $1::uuid LIMIT 1`, userId);
+    const tier = userResults[0]?.tier || "FREE";
 
-    let currentDownloads = 0;
+    // Fetch dynamic limits
+    const configResults: any[] = await prisma.$queryRawUnsafe(`SELECT "historyDownloadLimit" FROM "FeatureConfig" WHERE tier = $1 LIMIT 1`, tier);
+    const limit = configResults[0]?.historyDownloadLimit || (tier === "PAID" ? 10 : 2);
 
-    // Check and increment
     if (type === "history") {
-      const item = await (prisma as any).historyItem.findUnique({ where: { id } });
-      if (!item || item.userId !== session.user.id) {
+      const items: any[] = await prisma.$queryRawUnsafe(`SELECT * FROM "historyItem" WHERE id = $1 LIMIT 1`, id);
+      const item = items[0];
+      
+      if (!item || item.userId !== userId) {
         return NextResponse.json({ success: false, error: "Not found" }, { status: 404 });
       }
-      currentDownloads = item.downloadCount || 0;
-      
-      if (currentDownloads >= maxDownloads) {
-         return NextResponse.json({ success: false, error: `Download limit reached (${maxDownloads} max). Please upgrade to Pro.` }, { status: 403 });
-      }
 
-      await (prisma as any).historyItem.update({
-        where: { id },
-        data: { downloadCount: currentDownloads + 1 }
-      });
+      // Check tier-specific history download limits
+      if (tier === "PAID") {
+        let paid: any = await prisma.$queryRawUnsafe(`SELECT "historyDownloadCount" FROM "PaidUsers" WHERE id = $1::uuid LIMIT 1`, userId);
+        const count = paid[0]?.historyDownloadCount || 0;
+        
+        if (count >= limit) {
+           return NextResponse.json({ success: false, error: `History download limit reached (${limit}).` }, { status: 403 });
+        }
+        
+        await prisma.$executeRawUnsafe(`UPDATE "PaidUsers" SET "historyDownloadCount" = "historyDownloadCount" + 1 WHERE id = $1::uuid`, userId);
+      } else {
+        // Free user history limit (Standard downloadCount on historyItem)
+        if ((item.downloadCount || 0) >= limit) {
+           return NextResponse.json({ success: false, error: `Free history download limit reached (${limit}). Upgrade to Pro!` }, { status: 403 });
+        }
+      }
+      
+      await prisma.$executeRawUnsafe(`UPDATE "historyItem" SET "downloadCount" = "downloadCount" + 1 WHERE id = $1`, id);
 
     } else {
-      const activity = await prisma.activity.findUnique({ where: { id } });
-      if (!activity || activity.userId !== session.user.id) {
+      const activityResults: any[] = await prisma.$queryRawUnsafe(`SELECT * FROM activity WHERE id = $1 LIMIT 1`, id);
+      const activity = activityResults[0];
+      
+      if (!activity || activity.userId !== userId) {
         return NextResponse.json({ success: false, error: "Not found" }, { status: 404 });
       }
-      currentDownloads = activity.downloadCount || 0;
 
-      if (currentDownloads >= maxDownloads) {
-         return NextResponse.json({ success: false, error: `Download limit reached (${maxDownloads} max). Please upgrade to Pro.` }, { status: 403 });
-      }
-
-      await prisma.activity.update({
-        where: { id },
-        data: { downloadCount: currentDownloads + 1 }
-      });
+      await prisma.$executeRawUnsafe(`UPDATE activity SET "downloadCount" = "downloadCount" + 1 WHERE id = $1`, id);
     }
 
     // Redirect to actual S3 presigned URL or public URL

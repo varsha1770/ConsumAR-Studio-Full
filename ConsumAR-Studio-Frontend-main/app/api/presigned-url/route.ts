@@ -26,9 +26,10 @@ export async function GET(request: NextRequest) {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
 
-  let maxUploads = 10; // Default NON_LOGGED
+  let maxUploads = 10; 
   let userId = null;
   let prefix = "";
+  let uploadsUsed = 0;
 
   if (session?.user?.id) {
     userId = session.user.id;
@@ -39,22 +40,75 @@ export async function GET(request: NextRequest) {
     if (isAdmin) {
       maxUploads = 999999;
       prefix = `admin/${userId}/`;
+      uploadsUsed = 0;
     } else if (tier === "PAID") {
       maxUploads = 100;
       prefix = `paid/${userId}/`;
+      
+      // V4: Paid User Logic with Validity Timer
+      let paid: any = await prisma.$queryRawUnsafe(`SELECT * FROM "PaidUsers" WHERE id = $1::uuid LIMIT 1`, userId);
+      paid = paid[0];
+      
+      if (paid) {
+        if (new Date(paid.validityTimer) < new Date()) {
+          // Reset
+          await prisma.$executeRawUnsafe(`
+            UPDATE "PaidUsers" SET "dailyUploadCount" = 0, "dailyRescaleCount" = 0, "validityTimer" = $1::timestamp
+            WHERE id = $2::uuid
+          `, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), userId);
+          uploadsUsed = 0;
+        } else {
+          uploadsUsed = paid.dailyUploadCount;
+        }
+      } else {
+        // Create PaidUser entry if missing
+        await prisma.$executeRawUnsafe(`
+          INSERT INTO "PaidUsers" ("id", "validityTimer")
+          VALUES ($1::uuid, $2::timestamp)
+        `, userId, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString());
+        uploadsUsed = 0;
+      }
+
     } else if (tier === "FREE") {
-      maxUploads = 10;
+      maxUploads = 10; 
       prefix = `free/${userId}/`;
+      uploadsUsed = await (prisma.activity as any).count({
+        where: {
+          userId,
+          type: "UPLOAD",
+          createdAt: { gte: startOfDay }
+        }
+      });
+    }
+
+  } else {
+    // Guest Usage Check
+    const mac = request.headers.get("x-guest-mac") || new URL(request.url).searchParams.get("mac") || "unknown";
+    let guest: any = await prisma.$queryRawUnsafe(`
+      SELECT * FROM "GuestUsage" WHERE "ipAddress" = $1 AND "macAddress" = $2 LIMIT 1
+    `, ip, mac);
+    guest = guest[0];
+
+    if (guest) {
+      if (new Date(guest.expiresAt) < new Date()) {
+        // Reset if expired
+        await prisma.$executeRawUnsafe(`
+          UPDATE "GuestUsage" SET "uploadCount" = 0, "rescaleCount" = 0, "usdzCount" = 0, 
+          "expiresAt" = $1::timestamp, "lastUsage" = NOW() WHERE "id" = $2::uuid
+        `, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), guest.id);
+        uploadsUsed = 0;
+      } else {
+        uploadsUsed = guest.uploadCount;
+      }
+    } else {
+      // Create guest
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "GuestUsage" ("id", "ipAddress", "macAddress", "expiresAt", "lastUsage")
+        VALUES ($1::uuid, $2, $3, $4::timestamp, NOW())
+      `, crypto.randomUUID(), ip, mac, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString());
+      uploadsUsed = 0;
     }
   }
-
-  const uploadsUsed = await (prisma.activity as any).count({
-    where: {
-      ...(userId ? { userId } : { userId: null, ipAddress: ip }),
-      type: "UPLOAD",
-      createdAt: { gte: startOfDay }
-    }
-  });
 
   if (uploadsUsed >= maxUploads) {
     return NextResponse.json({ error: "Daily upload limit reached. Please upgrade or sign in." }, { status: 403 });
@@ -111,6 +165,21 @@ export async function GET(request: NextRequest) {
           glbFile: data.upload_url, // Keep track of the destination
         }
       });
+
+      if (!userId) {
+        const mac = request.headers.get("x-guest-mac") || new URL(request.url).searchParams.get("mac") || "unknown";
+        await prisma.$executeRawUnsafe(`
+          UPDATE "GuestUsage" SET "uploadCount" = "uploadCount" + 1, "lastUsage" = NOW()
+          WHERE "ipAddress" = $1 AND "macAddress" = $2
+        `, ip, mac);
+      } else {
+        const userObj = await (prisma.user as any).findUnique({ where: { id: userId }});
+        if (userObj?.tier === "PAID") {
+          await prisma.$executeRawUnsafe(`
+            UPDATE "PaidUsers" SET "dailyUploadCount" = "dailyUploadCount" + 1 WHERE id = $1::uuid
+          `, userId);
+        }
+      }
     } catch (logErr) {
       console.error("[presigned-url] Failed to log upload activity:", logErr);
     }

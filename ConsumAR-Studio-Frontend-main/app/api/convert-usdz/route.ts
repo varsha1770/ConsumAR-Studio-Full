@@ -16,29 +16,36 @@ export async function POST(request: Request) {
 
     const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 
-    let maxUsdz = 1; // Default NON_LOGGED
-    let maxUsdzMonth = 999999;
+    // Limits (Now dynamic from FeatureConfig via Raw SQL)
+    const allConfigs: any[] = await prisma.$queryRawUnsafe(`SELECT * FROM "FeatureConfig"`);
+    const configMap = allConfigs.reduce((acc: any, c: any) => {
+      acc[c.tier] = c;
+      return acc;
+    }, {});
+
+    const getConfig = (t: string) => configMap[t] || configMap['FREE'];
+    let currentConfig = getConfig('NON_LOGGED');
+
+    let maxUsdz = currentConfig.dailyUsdzLimit; 
+    let maxUsdzMonth = currentConfig.monthlyUsdzLimit;
     let userId = null;
     
     if (session?.user?.id) {
       userId = session.user.id;
-      const user = await (prisma.user as any).findUnique({ where: { id: userId }});
-      const userTier = user?.tier || "FREE";
+      const userResults: any[] = await prisma.$queryRawUnsafe(`
+        SELECT tier, "isAdmin", email FROM "Users" WHERE id = $1::uuid OR email = $2 LIMIT 1
+      `, userId, session.user.email || "");
       
-      // V16: Session Email Persistence Lock
-      const sessionEmail = session.user.email || user?.email;
-      console.log(`[convert-usdz] Session user found: ${sessionEmail} (${userId})`);
+      const user = userResults[0];
+      const userTier = user?.tier || "FREE";
+      currentConfig = getConfig(userTier);
 
       if (user?.isAdmin) {
-        // SUPER ADMIN BYPASS: Unlimited quota
         maxUsdz = 999999;
         maxUsdzMonth = 999999;
-      } else if (userTier === "PAID") {
-        maxUsdz = 999999;
-        maxUsdzMonth = 999999;
-      } else if (userTier === "FREE") {
-        maxUsdz = 2;
-        maxUsdzMonth = 15;
+      } else {
+        maxUsdz = currentConfig.dailyUsdzLimit;
+        maxUsdzMonth = currentConfig.monthlyUsdzLimit;
       }
     }
 
@@ -73,7 +80,13 @@ export async function POST(request: Request) {
       usdzUsedMonth = monthResults[0]?.count || 0;
     }
 
-    if (usdzUsed >= maxUsdz || usdzUsedMonth >= maxUsdzMonth) {
+    // V176: Emergency Bypass - Allow logged-in users to proceed even if limits are high
+    const isActuallyBlocked = !userId && (
+      (maxUsdz !== 999999 && maxUsdz > 0 && usdzUsed >= maxUsdz) || 
+      (maxUsdzMonth !== 999999 && maxUsdzMonth > 0 && usdzUsedMonth >= maxUsdzMonth)
+    );
+
+    if (isActuallyBlocked) {
       const errorMsg = usdzUsedMonth >= maxUsdzMonth 
         ? "Monthly limit reached. Upgrade to Pro for unlimited."
         : "Daily limit reached. Please upgrade to Pro. (Note: Account wipes do not reset daily limits)";
@@ -136,9 +149,15 @@ export async function POST(request: Request) {
         }
     }
 
-    // Build FormData for EC2
+    const isPaid = currentConfig.tier === "PAID" || currentConfig.isUsdzUnlimited;
+    const shouldWatermark = !isPaid;
+
+    // Build FormData for EC2 (V176: Explicit Branding Sync)
     const ec2Form = new FormData();
     ec2Form.append('s3_key', effective_key);
+    ec2Form.append('tier', currentConfig.tier);
+    ec2Form.append('watermark', shouldWatermark ? 'true' : 'false');
+    ec2Form.append('watermark_text', (incomingForm.get('watermark_text') as string) || 'TryitFirstLabs');
 
     console.log('[convert-usdz] Forwarding to EC2...');
 
@@ -168,64 +187,51 @@ export async function POST(request: Request) {
 
     const data = JSON.parse(text);
 
-    // LOG HISTORY & ACTIVITY
+    // LOG HISTORY & ACTIVITY (V176: Safe Mode Raw SQL)
     try {
-      console.log("[convert-usdz] Attempting to log activity...");
-      const session = await getServerSession(authOptions);
-      console.log("[convert-usdz] Session check:", session ? "Found" : "Missing", session?.user?.email);
-
-      const userId = (session?.user as any)?.id;
+      const currentSession = await getServerSession(authOptions);
+      const userId = (currentSession?.user as any)?.id;
+      const userEmail = currentSession?.user?.email;
+      const finalFileName = (s3_key as string).split('/').pop() || "Converted Model";
 
       if (userId) {
-        const finalFileName = s3KeyStr.split('/').pop() || "Converted Model";
-
-        // 1. Log to HistoryItem (Standard History)
+        // 1. Log to HistoryItem (Standard History) - RAW SQL
         try {
-          await (prisma as any).historyItem.create({
-            data: {
-              userId: userId,
-              fileName: finalFileName,
-              action: "CONVERT",
-              glbFile: glb_url as string,
-              usdzFile: data.usdz_url,
-            }
-          });
-          console.log("[convert-usdz] HistoryItem created.");
-        } catch (hErr) {
-          console.error("[convert-usdz] HistoryItem creation failed:", hErr);
-        }
+          await prisma.$executeRawUnsafe(`
+            INSERT INTO "HistoryItem" ("id", "userId", "fileName", "action", "glbFile", "usdzFile", "createdAt", "updatedAt")
+            VALUES ($1, $2::uuid, $3, 'CONVERT', $4, $5, NOW(), NOW())
+          `, Math.random().toString(36).substring(7), userId, finalFileName, glb_url as string, data.usdz_url);
+        } catch (hErr) { console.error("[convert-usdz] History error:", hErr); }
 
-        // 2. Log to Activity (Increments Dashboard Count & Stores Links)
+        // 2. Log to Activity (Dashboard Stats) - RAW SQL
         try {
-          const activityEmail = session?.user?.email || (userId ? (await (prisma.user as any).findUnique({ where: { id: userId }}))?.email : null);
-
           await prisma.$executeRawUnsafe(`
             INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile", "usdzFile")
-            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8)
-          `, Math.random().toString(36).substring(7), userId, activityEmail || null, ip, "USDZ_CONVERT", finalFileName.endsWith('.usdz') ? finalFileName : `${finalFileName}.usdz`, glb_url as string, data.file_url);
-          console.log(`[convert-usdz] Activity record created for: ${activityEmail}`);
-        } catch (aErr) {
-          console.error("[convert-usdz] Activity creation failed:", aErr);
-        }
+            VALUES ($1, $2::uuid, $3, $4, 'USDZ_CONVERT', $5, $6, $7)
+          `, Math.random().toString(36).substring(7), userId, userEmail, ip, finalFileName, glb_url as string, data.usdz_url);
+        } catch (aErr) { console.error("[convert-usdz] Activity error:", aErr); }
 
       } else {
-        // Log anonymous user activity
-        const finalFileName = s3KeyStr.split('/').pop() || "Converted Model";
+        // Log anonymous user activity - RAW SQL
         try {
           await prisma.$executeRawUnsafe(`
             INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile", "usdzFile")
-            VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6)
-          `, Math.random().toString(36).substring(7), ip, "USDZ_CONVERT", finalFileName.endsWith('.usdz') ? finalFileName : `${finalFileName}.usdz`, glb_url as string, data.file_url);
-          console.log("[convert-usdz] Anonymous activity record created (Raw SQL).");
-        } catch (aErr) {
-          console.error("[convert-usdz] Anonymous Activity creation failed:", aErr);
-        }
+            VALUES ($1, NULL, NULL, $2, 'USDZ_CONVERT', $3, $4, $5)
+          `, Math.random().toString(36).substring(7), ip, finalFileName, glb_url as string, data.usdz_url);
+          
+          const mac = request.headers.get("x-guest-mac") || "unknown";
+          await prisma.$executeRawUnsafe(`
+            UPDATE "GuestUsage" SET "usdzCount" = "usdzCount" + 1, "lastUsage" = NOW()
+            WHERE "ipAddress" = $1 AND "macAddress" = $2
+          `, ip, mac);
+        } catch (aErr) { console.error("[convert-usdz] Guest activity error:", aErr); }
       }
-    } catch (sessionErr) {
-      console.error("[convert-usdz] Critical failure in logging block:", sessionErr);
+    } catch (logErr) {
+      console.error("[convert-usdz] Logging failed:", logErr);
     }
 
-    const updatedUsage = await getUsage(userId, ip, session?.user?.email);
+    const mac_usdz = request.headers.get("x-guest-mac") || "unknown";
+    const updatedUsage = await getUsage(userId, ip, session?.user?.email, mac_usdz);
     return NextResponse.json({ ...data, usage: updatedUsage });
 
   } catch (err: any) {
@@ -253,7 +259,7 @@ export async function OPTIONS() {
 }
 
 // HELPER: Calculates updated usage stats for the dashboard
-async function getUsage(userId: string | null, ip: string, sessionEmail?: string | null) {
+async function getUsage(userId: string | null, ip: string, sessionEmail?: string | null, macAddress: string = "unknown") {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
@@ -302,7 +308,27 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
       maxUsdz = 2; maxUsdzMonth = 15;
       maxUploads = 10; 
     }
-    else if (tier === "PAID") { maxRescales = 20; maxRescalesMonth = 250; maxUsdz = 999999; maxUsdzMonth = 999999; maxUploads = 100; }
+    else if (tier === "PAID") {
+      const paidData: any[] = await prisma.$queryRawUnsafe(`
+        SELECT "dailyUploadCount", "dailyRescaleCount", "monthlyRescaleCount", "historyDownloadCount"
+        FROM "PaidUsers" WHERE id = $1::uuid LIMIT 1
+      `, userId);
+      
+      const p = paidData[0] || {};
+      return {
+        tier: "PAID",
+        rescales: p.dailyRescaleCount || 0,
+        maxRescales: 20,
+        rescalesMonth: p.monthlyRescaleCount || 0,
+        maxRescalesMonth: 250,
+        usdz: 0, // Still using activities count logic below for usdz
+        maxUsdz: 999999,
+        uploads: p.dailyUploadCount || 0,
+        maxUploads: 100,
+        historyDownloads: p.historyDownloadCount || 0,
+        maxHistoryDownloads: 10
+      };
+    }
   }
 
   let baseWhereSql = "";
@@ -314,9 +340,21 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
       )
     `;
   } else {
-    baseWhereSql = `
-      AND ("userId" IS NULL AND "ipAddress" = $3)
-    `;
+    // V3: Guest Usage fetch from GuestUsage table
+    const guest: any = await prisma.$queryRawUnsafe(`
+      SELECT * FROM "GuestUsage" WHERE "ipAddress" = $3 AND "macAddress" = $4 LIMIT 1
+    `, null, null, ip, macAddress);
+
+    if (guest[0]) {
+      const g = guest[0];
+      return {
+        rescales: g.rescaleCount, maxRescales,
+        rescalesMonth: g.rescaleCount, maxRescalesMonth,
+        usdz: g.usdzCount, maxUsdz,
+        usdzMonth: g.usdzCount, maxUsdzMonth,
+        uploads: g.uploadCount, maxUploads
+      };
+    }
   }
 
   const rescaleResults: any[] = await prisma.$queryRawUnsafe(`

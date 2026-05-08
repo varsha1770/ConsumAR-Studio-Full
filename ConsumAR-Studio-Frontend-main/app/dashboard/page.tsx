@@ -122,7 +122,7 @@ export default function DashboardPage() {
   }
 
   const conversionsCount = history.filter(h => h.action === 'CONVERT' || h.action === 'CONVERSION' || h.action === 'USDZ_CONVERT').length;
-  const maxDownloads = userTier === "PAID" ? 10 : 2;
+  const maxDownloads = 999999; 
 
   const getDaysUntilExpiry = (createdAt: string) => {
     const createdDate = new Date(createdAt);
@@ -282,8 +282,8 @@ export default function DashboardPage() {
                         </td>
                         <td className="px-10 py-6 text-right">
                           <div className="flex flex-col items-end gap-2">
-                            <span className={`text-[10px] font-bold tracking-widest uppercase ${item.downloadCount >= maxDownloads ? "text-red-500" : "text-slate-400"}`}>
-                              DL: {item.downloadCount}/{maxDownloads}
+                            <span className="text-[10px] font-bold tracking-widest uppercase text-slate-400">
+                              Access Secure
                             </span>
                             <div className="flex items-center justify-end gap-2">
                               {!isExpired && item.glbFile && (

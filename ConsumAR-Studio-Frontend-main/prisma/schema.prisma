@@ -23,6 +23,7 @@ model User {
   activities    Activity[]
   history       HistoryItem[]
   settings      UserSettings?
+  paidDetails   PaidUser?
 
   @@map("Users")
   @@index([email])
@@ -122,4 +123,47 @@ enum Tier {
   NON_LOGGED
   FREE
   PAID
+}
+
+model GuestUsage {
+  id           String   @id @default(uuid()) @db.Uuid
+  ipAddress    String
+  macAddress   String?  // Unique identifier (Fingerprint/MAC equivalent)
+  rescaleCount Int      @default(0)
+  uploadCount  Int      @default(0)
+  usdzCount    Int      @default(0)
+  lastUsage    DateTime @default(now())
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@map("GuestUsage")
+  @@index([ipAddress, macAddress])
+}
+
+model PaidUser {
+  id                   String   @id @db.Uuid
+  dailyUploadCount     Int      @default(0)
+  dailyRescaleCount    Int      @default(0)
+  monthlyRescaleCount  Int      @default(0)
+  historyDownloadCount Int      @default(0)
+  validityTimer        DateTime @default(now()) 
+  createdAt            DateTime @default(now())
+  user                 User     @relation(fields: [id], references: [id], onDelete: Cascade)
+
+  @@map("PaidUsers")
+  @@index([id, validityTimer])
+}
+
+model FeatureConfig {
+  tier                 Tier     @id
+  dailyUploadLimit     Int
+  dailyRescaleLimit    Int
+  monthlyRescaleLimit  Int
+  dailyUsdzLimit       Int
+  monthlyUsdzLimit     Int
+  historyDownloadLimit Int
+  allowedUnits         String[]
+  isUsdzUnlimited      Boolean  @default(false)
+
+  @@map("FeatureConfig")
 }

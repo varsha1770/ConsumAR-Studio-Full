@@ -85,7 +85,8 @@ def download_from_s3(s3_key):
                 s3.download_file(bucket, key, local_path)
                 print(f"SUCCESS: S3_Utils Found in bucket={bucket}")
                 return local_path
-            except:
+            except Exception as e:
+                print(f"DEBUG: S3_Utils Probe failed for bucket={bucket}, key={key} -> {e}")
                 continue
 
     raise RuntimeError(f"S3_Utils: Could not find model {s3_key} in buckets {buckets_to_try}")

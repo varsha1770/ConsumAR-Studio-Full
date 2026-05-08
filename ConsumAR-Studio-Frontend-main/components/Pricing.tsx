@@ -8,10 +8,10 @@ const plans = [
     description: "Try the magic instantly",
     features: [
       "2 Rescales per day",
-      "1 USDZ conversion",
-      "Centimeters only",
-      "No login required",
-      "Public history"
+      "10 Model uploads per day",
+      "1 USDZ download per day",
+      "Centimeters view only",
+      "No login required"
     ],
     cta: "Try Now",
     popular: false,
@@ -23,10 +23,11 @@ const plans = [
     description: "Better experience with login",
     features: [
       "3 Rescales per day",
-      "2 USDZ conversions",
+      "10 Model uploads per day",
+      "2 USDZ downloads per day",
       "60 Monthly Rescales",
-      "Feet & Centimeters",
-      "Personal Dashboard"
+      "Feet & Centimeters view",
+      "2 History Downloads"
     ],
     cta: "Sign Up Free",
     popular: false,
@@ -38,11 +39,12 @@ const plans = [
     description: "Full power for professionals",
     features: [
       "20 Rescales per day",
+      "100 Model uploads per day",
+      "Unlimited USDZ",
       "250 Monthly Rescales",
-      "100 Uploads per day",
-      "Unlimited USDZ conversions",
       "All Units (MM, CM, M, FT, IN)",
-      "10x History Downloads"
+      "10 History Downloads",
+      "Premium Support"
     ],
     cta: "Coming Soon",
     popular: true,

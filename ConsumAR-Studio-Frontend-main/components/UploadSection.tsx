@@ -13,6 +13,7 @@ import axios from "axios";
 import HeroSection from "./HeroSection";
 import EditorControls from "./EditorControls";
 import FaqSection from "./FaqSection";
+import { getGuestMac } from "@/lib/guest";
 
 const toProxied = (url: string | null): string | null => {
   if (!url) return null;
@@ -23,22 +24,23 @@ const toProxied = (url: string | null): string | null => {
 const unitLabel: Record<string, string> = { millimeters: "mm", centimeters: "cm", inches: "in", feet: "ft", meters: "m" };
 
 export default function UploadSection() {
-  const router = useRouter();
   const { data: session } = useSession();
-  
-  // State
+  const router = useRouter();
+
   const [glbFile, setGlbFile] = useState<string | null>(null);
   const [glbFileKey, setGlbFileKey] = useState<string | null>(null);
   const [glbFileName, setGlbFileName] = useState<string | null>(null);
+
   const [localGlbUrl, setLocalGlbUrl] = useState<string | null>(null);
-  const [dimensions, setDimensions] = useState({ length: "0ft", width: "0ft", height: "0ft" });
-  const [dimensionUnit, setDimensionUnit] = useState("meters");
+  const [dimensions, setDimensions] = useState({ length: "0cm", width: "0cm", height: "0cm" });
+  const [dimensionUnit, setDimensionUnit] = useState("centimeters");
   const [dimensionInputs, setDimensionInputs] = useState({ length: "", width: "", height: "" });
-  const [rawModelDimensions, setRawModelDimensions] = useState<{length: number, width: number, height: number} | null>(null);
+  const [rawModelDimensions, setRawModelDimensions] = useState<{ length: number, width: number, height: number } | null>(null);
   const [scaleValue, setScaleValue] = useState("");
   const [resizeMode, setResizeMode] = useState<"manual" | "scale">("manual");
   const [isResizing, setIsResizing] = useState(false);
   const [originalDimensions, setOriginalDimensions] = useState<any>(null);
+  const [lastAppliedDimensions, setLastAppliedDimensions] = useState<any>(null);
   const [originalDimensionUnit, setOriginalDimensionUnit] = useState<string>("meters");
   const [originalGlbUrl, setOriginalGlbUrl] = useState<string | null>(null);
   const [originalGlbKey, setOriginalGlbKey] = useState<string | null>(null);
@@ -77,10 +79,16 @@ export default function UploadSection() {
   useEffect(() => {
     const fetchLimits = async () => {
       try {
-        const res = await axios.get("/api/user/limits");
+        const res = await axios.get("/api/user/limits", {
+          params: { mac: getGuestMac() },
+          headers: { "x-guest-mac": getGuestMac() }
+        });
         if (res.data.success) {
           setUserTier(res.data.tier);
           setUsageStats(res.data.usage);
+          if (res.data.tier === "NON_LOGGED") {
+            setDimensionUnit("centimeters");
+          }
         }
       } catch (err) { console.error("Failed to fetch limits", err); }
     };
@@ -99,16 +107,16 @@ export default function UploadSection() {
             hasLoadedSettings.current = true;
             const isLocalZero = parseFloat(dimensions.length) === 0 && parseFloat(dimensions.width) === 0 && parseFloat(dimensions.height) === 0;
             if (isLocalZero) {
-                if (s.dimensions) setDimensions(s.dimensions);
-                if (s.dimensionUnit) setDimensionUnit(s.dimensionUnit);
-                if (s.scaleValue) setScaleValue(s.scaleValue);
-                if (s.dimensions) {
-                   setDimensionInputs({
-                     length: (parseFloat(s.dimensions.length) || 0).toString(),
-                     width: (parseFloat(s.dimensions.width) || 0).toString(),
-                     height: (parseFloat(s.dimensions.height) || 0).toString()
-                   });
-                }
+              if (s.dimensions) setDimensions(s.dimensions);
+              if (s.dimensionUnit) setDimensionUnit(s.dimensionUnit);
+              if (s.scaleValue) setScaleValue(s.scaleValue);
+              if (s.dimensions) {
+                setDimensionInputs({
+                  length: (parseFloat(s.dimensions.length) || 0).toString(),
+                  width: (parseFloat(s.dimensions.width) || 0).toString(),
+                  height: (parseFloat(s.dimensions.height) || 0).toString()
+                });
+              }
             }
           }
         } catch (e) { console.error("The Butler failed:", e); }
@@ -144,7 +152,7 @@ export default function UploadSection() {
     console.log("[Studio] Viewer reported error. Reverting to upload page...");
     setHasLoadError(true);
     setTimeout(() => {
-       clearBrokenModel();
+      clearBrokenModel();
     }, 2000);
   };
 
@@ -162,6 +170,7 @@ export default function UploadSection() {
     setOriginalGlbKey(fileKey);
     setOriginalGlbFileName(fileName);
     setOriginalDimensions(null);
+    setLastAppliedDimensions(null);
     setRawModelDimensions(null);
     setDimensionInputs({ length: "", width: "", height: "" });
     const unitSuffix = unitLabel[dimensionUnit] || "ft";
@@ -222,38 +231,67 @@ export default function UploadSection() {
     let l = parseFloat(dimensionInputs.length) || 0;
     let w = parseFloat(dimensionInputs.width) || 0;
     let h = parseFloat(dimensionInputs.height) || 0;
+
     if (resizeMode === "scale" && scaleValue && parseFloat(scaleValue) > 0) {
       const s = parseFloat(scaleValue);
       const toMm: Record<string, number> = { millimeters: 1, centimeters: 10, inches: 25.4, feet: 304.8, meters: 1000 };
-      const factor = 1000 / (toMm[dimensionUnit] || 1000);
-      l = (originalDimensions?.length || 0) * s * factor;
-      w = (originalDimensions?.width || 0) * s * factor;
-      h = (originalDimensions?.height || 0) * s * factor;
+
+      const origL = parseFloat(originalDimensions?.length) || 0;
+      const origW = parseFloat(originalDimensions?.width) || 0;
+      const origH = parseFloat(originalDimensions?.height) || 0;
+
+      // V176: Smart Normalization Fix. Use 10.0 threshold to match EditorControls
+      const isHuge = (origL > 10.0 || origW > 10.0 || origH > 10.0);
+      const normalizer = isHuge ? 0.01 : 1.0;
+      const unitFactor = 1000 / (toMm[dimensionUnit] || 1000);
+
+      l = origL * normalizer * s * unitFactor;
+      w = origW * normalizer * s * unitFactor;
+      h = origH * normalizer * s * unitFactor;
     }
-    return { length: `${l.toFixed(2)}${unitSuffix}`, width: `${w.toFixed(2)}${unitSuffix}`, height: `${h.toFixed(2)}${unitSuffix}` };
+
+    const formatValue = (val: number) => {
+      return val.toFixed(3);
+    };
+
+    return {
+      length: `${formatValue(l)}${unitSuffix}`,
+      width: `${formatValue(w)}${unitSuffix}`,
+      height: `${formatValue(h)}${unitSuffix}`
+    };
   }, [resizeMode, scaleValue, dimensionInputs, dimensionUnit, originalDimensions]);
 
-  const handleApply = async (forceWatermarkOverride?: boolean) => {
-    if (!glbFileKey) return;
+  // V176: PERFORMANCE DEBOUNCE - Wait 300ms after typing before updating 3D viewer
+  const [debouncedDimensions, setDebouncedDimensions] = useState(liveDimensions);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedDimensions(liveDimensions);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [liveDimensions]);
+
+  const handleApply = async (forceWatermarkOverride?: boolean, isDownload: boolean = false, isRemoval: boolean = false): Promise<string | null> => {
+    if (!glbFileKey) return null;
     const l = parseFloat(liveDimensions.length);
     const w = parseFloat(liveDimensions.width);
     const h = parseFloat(liveDimensions.height);
     if (isNaN(l) || isNaN(w) || isNaN(h) || l <= 0) {
       toast.error("Please enter valid dimensions.");
-      return;
+      return null;
     }
     if (!originalDimensions) setOriginalDimensions({ ...dimensionInputs });
     setIsResizing(true);
     try {
       const activeWatermark = forceWatermarkOverride !== undefined ? forceWatermarkOverride : forceWatermark;
-      const currentDims = JSON.stringify({ l, w, h, unit: dimensionUnit, watermark: activeWatermark, text: watermarkText });
-      
-      if ((window as any)._lastAppliedDims === currentDims) {
+      const currentDims = JSON.stringify({ l, w, h, unit: dimensionUnit, watermark: activeWatermark, text: watermarkText, isDownload, isRemoval });
+
+      if (!isDownload && !isRemoval && (window as any)._lastAppliedDims === currentDims) {
         toast.success("Design already applied!", { id: "res" });
         setIsResizing(false);
-        return;
+        return null;
       }
-      toast.loading("Optimizing & Baking Design...", { id: "res" });
+      toast.dismiss(); // Clear previous notifications
+      toast.loading(isRemoval ? "Stripping Watermark..." : isDownload ? "Finalizing for download..." : "Optimizing & Baking Design...", { id: "res" });
       const fUrl = toProxied(originalGlbUrl) || toProxied(glbFile)!;
       const fRes = await fetch(fUrl);
       const fBlob = await fRes.blob();
@@ -265,16 +303,22 @@ export default function UploadSection() {
       const unitMap: Record<string, string> = { feet: "ft", inches: "in", centimeters: "cm", meters: "m", millimeters: "mm" };
       fd.append('unit', unitMap[dimensionUnit] || "m");
       fd.append('tier', userTier);
+      fd.append('is_download', isDownload ? "true" : "false");
+      fd.append('remove_watermark', isRemoval ? "true" : "false");
       if (activeWatermark) {
         fd.append('force_watermark', 'true');
         fd.append('watermark_text', watermarkText);
       }
-      const apiRes = await axios.post("/api/resize", fd, { timeout: 120000, validateStatus: (status) => status < 500 });
+      const apiRes = await axios.post("/api/resize", fd, {
+        timeout: 120000,
+        validateStatus: (status) => status < 500,
+        headers: { "x-guest-mac": getGuestMac() }
+      });
       if (apiRes.status === 403) {
         triggerUpgrade(apiRes.data.error || "Daily limit reached.");
         toast.dismiss("res");
         setIsResizing(false);
-        return;
+        return null;
       }
       if (apiRes.data.success) {
         console.log("[Studio] Resize Success:", apiRes.data.glb_url);
@@ -284,19 +328,25 @@ export default function UploadSection() {
         setLocalGlbUrl(proxiedUrl);
         setGlbFile(proxiedUrl);
         setGlbFileKey(apiRes.data.file_key);
+        setDimensions({ ...liveDimensions });
+        setDebouncedDimensions({ ...liveDimensions }); // IMMEDIATE SYNC after resize
         setPreviewVersion(v => v + 1);
         (window as any)._lastAppliedDims = currentDims;
         const fmt = (v: number) => (Math.round(v * 100) / 100).toString();
         setDimensionInputs({ length: fmt(l), width: fmt(w), height: fmt(h) });
-        setDimensions(liveDimensions);
+        setLastAppliedDimensions({ length: l, width: w, height: h });
+        setOriginalDimensionUnit(dimensionUnit);
         setScaleValue("");
         if (apiRes.data.usage) setUsageStats(apiRes.data.usage);
         toast.success("Done!", { id: "res" });
         saveSettings({ glbFile: proxiedUrl, glbFileKey: apiRes.data.file_key, dimensions: liveDimensions, dimensionUnit, scaleValue: "" });
+        return proxiedUrl;
       }
+      return null;
     } catch (e: any) {
       if (e.response?.status === 403) triggerUpgrade(e.response.data.error);
       else toast.error("Resize failed.", { id: "res" });
+      return null;
     } finally { setIsResizing(false); }
   };
 
@@ -320,76 +370,140 @@ export default function UploadSection() {
   };
 
   const handleDownload = async (url: string, fileName: string, draco = false) => {
+    const toastId = "download-process";
     try {
-      toast.loading("Fetching...", { id: "dl" });
-      const r = await fetch(url);
+      const isPaid = userTier === "PAID" || isSuperAdmin;
+      let finalUrl = url;
+
+      if (!isPaid) {
+        toast.loading("Baking Protection...", { id: toastId });
+        const brandedUrl = await handleApply(true, true);
+        if (!brandedUrl) {
+          toast.error("Download preparation failed.", { id: toastId });
+          return;
+        }
+        finalUrl = brandedUrl;
+      } else {
+        finalUrl = glbFile || url;
+      }
+
+      toast.loading("Fetching model...", { id: toastId });
+      const r = await fetch(finalUrl);
       let b = await r.blob();
+
       if (draco) {
+        toast.loading("Optimizing GLB...", { id: toastId });
         const { compressGLB } = await import('../utils/glbCompressor');
         b = await compressGLB(new File([b], fileName));
       }
+
       const a = document.createElement("a");
       a.href = window.URL.createObjectURL(b);
       a.download = fileName;
       a.click();
-      toast.success("Ready!", { id: "dl" });
-    } catch (e) { toast.error("Failed."); }
+      toast.success("Ready! ✅", { id: toastId });
+    } catch (e) {
+      toast.error("Failed to download.", { id: toastId });
+    }
   };
 
   const handleConvert = async () => {
     if (isConvertingUSDZ || !glbFileKey) return;
+    const toastId = "usdz-process";
     setIsConvertingUSDZ(true);
     try {
-      toast.loading("Converting...", { id: "usdz" });
+      toast.loading("Starting conversion...", { id: toastId });
       const fd = new FormData();
       fd.append("s3_key", glbFileKey);
       fd.append("tier", userTier);
-      fd.append("watermark", forceWatermark ? "true" : "false");
+      fd.append("is_download", "true");
+      fd.append("watermark", "true");
+      fd.append("watermark_text", watermarkText);
+
       const isServerUrl = (u: string | null) => !!u && (u.startsWith("http://localhost") || u.startsWith("http://127.0.0.1"));
       const glbUrlToSend = isServerUrl(localGlbUrl) ? localGlbUrl : glbFile;
       if (glbUrlToSend) fd.append("glb_url", glbUrlToSend);
-      const res = await axios.post("/api/convert-usdz", fd, { validateStatus: (status) => status < 500 });
+
+      toast.loading("Processing USDZ... This may take a minute.", { id: toastId });
+      const res = await axios.post("/api/convert-usdz", fd, {
+        validateStatus: (status) => status < 500,
+        headers: { "x-guest-mac": getGuestMac() }
+      });
+
       if (res.status === 403) {
         triggerUpgrade(res.data.error || "Limit reached.");
-        toast.dismiss("usdz");
+        toast.dismiss(toastId);
         setIsConvertingUSDZ(false);
         return;
       }
+
       if (!res.data || !res.data.success) throw new Error(res.data?.error || "Backend failure");
+
       const downloadUrl = res.data.file_url || res.data.url;
       setConvertedUsdzUrl(downloadUrl);
       if (res.data.usage) setUsageStats(res.data.usage);
+
       const a = document.createElement("a");
       a.href = downloadUrl;
       a.download = res.data.filename || "model.usdz";
       a.click();
-      toast.success("Converted!", { id: "usdz" });
+      toast.success("Converted successfully! ✅", { id: toastId });
     } catch (e: any) {
-      toast.error("Failed.", { id: "usdz" });
+      toast.error("Conversion failed. Please try again.", { id: toastId });
     } finally { setIsConvertingUSDZ(false); }
   };
 
   const handleDetected = useCallback((d: { length: number; width: number; height: number }) => {
-    const isCurrentlyZero = parseFloat(dimensions.length) === 0 && parseFloat(dimensions.width) === 0 && parseFloat(dimensions.height) === 0;
-    if (d.length === 0 && d.width === 0 && d.height === 0 && !isCurrentlyZero) return;
-    let rawL = d.length; let rawW = d.width; let rawH = d.height;
-    setRawModelDimensions({ length: rawL, width: rawW, height: rawH });
-    setOriginalDimensions({ length: rawL, width: rawW, height: rawH });
+    if (isNaN(d.length) || isNaN(d.width) || isNaN(d.height)) return;
+
+    setRawModelDimensions((prev: { length: number; width: number; height: number } | null) => {
+      if (prev && Math.abs(prev.length - d.length) < 0.001 && Math.abs(prev.height - d.height) < 0.001) return prev;
+      return { length: d.length, width: d.width, height: d.height };
+    });
+
+    setOriginalDimensions((prev: any) => {
+      if (prev) return prev;
+      return { length: d.length, width: d.width, height: d.height };
+    });
+    setLastAppliedDimensions((prev: any) => {
+      if (prev) return prev;
+      return { length: d.length, width: d.width, height: d.height };
+    });
     setOriginalDimensionUnit("meters");
-  }, [dimensions]);
+  }, []); // Empty dependency array to stay stable
+
+  const handleRemoveWatermark = () => {
+    if (userTier !== "PAID" && !isSuperAdmin) {
+      triggerUpgrade("Watermark removal is a Premium feature!");
+      return;
+    }
+    handleApply(false, true); // forceWatermark=false, isRemoval=true
+  };
 
   useEffect(() => {
-    if (rawModelDimensions && !dimensionInputs.length && !dimensionInputs.width && !dimensionInputs.height) {
+    if (rawModelDimensions) {
       const toMm: Record<string, number> = { millimeters: 1, centimeters: 10, inches: 25.4, feet: 304.8, meters: 1000 };
-      const factor = 1000 / (toMm[dimensionUnit] || 1000);
       const unitSuffix = unitLabel[dimensionUnit] || "ft";
-      const l = (rawModelDimensions.length * factor).toFixed(2);
-      const w = (rawModelDimensions.width * factor).toFixed(2);
-      const h = (rawModelDimensions.height * factor).toFixed(2);
+
+      // V176: Smart Factor. Use 10.0 threshold to match EditorControls
+      const isHuge = (rawModelDimensions.length > 10.0 || rawModelDimensions.width > 10.0 || rawModelDimensions.height > 10.0);
+      const normalizer = isHuge ? 0.01 : 1.0;
+      const unitFactor = 1000 / (toMm[dimensionUnit] || 1000);
+
+      const formatValue = (val: number): string => {
+        if (isNaN(val)) return "0.000";
+        return val.toFixed(3);
+      };
+
+      const l = formatValue(rawModelDimensions.length * normalizer * unitFactor);
+      const w = formatValue(rawModelDimensions.width * normalizer * unitFactor);
+      const h = formatValue(rawModelDimensions.height * normalizer * unitFactor);
+
+      // V145: Force update sidebar to match real model dimensions
       setDimensionInputs({ length: l, width: w, height: h });
       setDimensions({ length: `${l}${unitSuffix}`, width: `${w}${unitSuffix}`, height: `${h}${unitSuffix}` });
     }
-  }, [rawModelDimensions, dimensionUnit, dimensionInputs.length]);
+  }, [rawModelDimensions, dimensionUnit]);
 
 
   if (!glbFile || hasLoadError) {
@@ -397,20 +511,20 @@ export default function UploadSection() {
       <div className="w-full">
         {hasLoadError && (
           <div className="max-w-4xl mx-auto mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-4 animate-in fade-in slide-in-from-top-4">
-             <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center text-red-600">
-               <CubeTransparentIcon className="w-6 h-6" />
-             </div>
-             <div>
-               <p className="text-sm font-bold text-red-900">Broken Model Detected</p>
-               <p className="text-xs text-red-600">Your previous model couldn't be loaded. Resetting to upload page...</p>
-             </div>
+            <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center text-red-600">
+              <CubeTransparentIcon className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-red-900">Broken Model Detected</p>
+              <p className="text-xs text-red-600">Your previous model couldn't be loaded. Resetting to upload page...</p>
+            </div>
           </div>
         )}
-        <HeroSection 
-          glbFile={glbFile} 
-          glbFileName={glbFileName} 
-          handleGLBUpload={handleGLBUpload} 
-          userTier={userTier} 
+        <HeroSection
+          glbFile={glbFile}
+          glbFileName={glbFileName}
+          handleGLBUpload={handleGLBUpload}
+          userTier={userTier}
           isOverUploadLimit={!isSuperAdmin && usageStats && usageStats.uploads >= usageStats.maxUploads}
         />
         <FaqSection />
@@ -423,11 +537,12 @@ export default function UploadSection() {
       <div className="flex flex-col lg:flex-row gap-8 items-start w-full px-4">
         <div className="flex-1 flex flex-col min-h-[500px] lg:min-h-[500px] relative">
           <div className="flex-1 relative flex flex-col">
-            <ModelPreview3D 
+            <ModelPreview3D
               key={`${glbFileKey || "no-model"}-${previewVersion}`}
-              glbUrl={localGlbUrl || toProxied(glbFile)!} 
-              dimensions={liveDimensions} 
-              onModelDimensionsDetected={handleDetected} 
+              glbUrl={localGlbUrl || toProxied(glbFile)!}
+              dimensions={debouncedDimensions}
+              currentUnit={dimensionUnit}
+              onModelDimensionsDetected={handleDetected}
               onReset={clearBrokenModel}
               onError={handleViewerError}
               isOptimizing={isResizing}
@@ -436,17 +551,17 @@ export default function UploadSection() {
             />
           </div>
           <div className="absolute -right-5 top-1/2 -translate-y-1/2 z-[3000]">
-            <ManualUpload 
-              onGLBUpload={handleGLBUpload} 
-              currentGlbUrl={glbFile} 
-              glbFileName={glbFileName} 
-              variant="replacer" 
-              userTier={userTier} 
+            <ManualUpload
+              onGLBUpload={handleGLBUpload}
+              currentGlbUrl={glbFile}
+              glbFileName={glbFileName}
+              variant="replacer"
+              userTier={userTier}
               isOverUploadLimit={!isSuperAdmin && usageStats && usageStats.uploads >= usageStats.maxUploads}
             />
           </div>
           {isResizing && (
-            <div className="absolute inset-0 bg-white/40 backdrop-blur-[6px] z-50 flex flex-col items-center justify-center">
+            <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-[2500] flex flex-col items-center justify-center rounded-xl">
               <div className="relative">
                 <div className="w-16 h-16 border-4 border-blue-200 border-t-purple-600 rounded-full animate-spin"></div>
                 <div className="absolute inset-0 flex items-center justify-center">
@@ -460,7 +575,7 @@ export default function UploadSection() {
           )}
         </div>
 
-        <EditorControls 
+        <EditorControls
           dimensionUnit={dimensionUnit}
           handleUnitChange={handleUnitChange}
           resizeMode={resizeMode}
@@ -477,7 +592,7 @@ export default function UploadSection() {
           usageStats={usageStats}
           isResizing={isResizing}
           glbFileKey={glbFileKey}
-          originalDimensions={originalDimensions}
+          originalDimensions={lastAppliedDimensions || originalDimensions}
           originalDimensionUnit={originalDimensionUnit}
           rawModelDimensions={rawModelDimensions}
           glbFile={glbFile}
@@ -485,6 +600,7 @@ export default function UploadSection() {
           handleReset={handleReset}
           handleDownload={handleDownload}
           handleConvert={handleConvert}
+          handleRemoveWatermark={handleRemoveWatermark}
           toProxied={toProxied}
           triggerUpgrade={triggerUpgrade}
           forceWatermark={forceWatermark}
@@ -506,14 +622,14 @@ export default function UploadSection() {
               <p className="text-red-700 text-center text-[11px] font-bold leading-tight">⚠️ {upgradeMessage}</p>
             </div>
             <div className="space-y-4 mb-8">
-               <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-green-50 flex items-center justify-center text-green-600"><CheckCircleIcon className="w-5 h-5" /></div>
-                  <div><p className="text-xs font-black text-gray-900">250 Monthly Rescales</p></div>
-               </div>
-               <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center text-blue-600"><CheckCircleIcon className="w-5 h-5" /></div>
-                  <div><p className="text-xs font-black text-gray-900">Unlimited USDZ & AR</p></div>
-               </div>
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-green-50 flex items-center justify-center text-green-600"><CheckCircleIcon className="w-5 h-5" /></div>
+                <div><p className="text-xs font-black text-gray-900">250 Monthly Rescales</p></div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center text-blue-600"><CheckCircleIcon className="w-5 h-5" /></div>
+                <div><p className="text-xs font-black text-gray-900">Unlimited USDZ & AR</p></div>
+              </div>
             </div>
             <div className="flex flex-col gap-3">
               {userTier === "NON_LOGGED" ? (
@@ -528,7 +644,7 @@ export default function UploadSection() {
 
       {/* Emergency Recovery Button - Only visible when stuck */}
       {glbFile && (
-        <button 
+        <button
           onClick={clearBrokenModel}
           className="fixed bottom-4 left-4 z-[4000] px-3 py-1.5 bg-gray-900/50 hover:bg-gray-900 text-white text-[10px] font-bold rounded-lg backdrop-blur-sm transition-all flex items-center gap-2 opacity-50 hover:opacity-100"
         >

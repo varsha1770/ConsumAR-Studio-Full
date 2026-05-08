@@ -4,6 +4,7 @@ import { useDropzone } from "react-dropzone";
 import axios from "axios";
 import toast from "react-hot-toast";
 import { CheckCircleIcon, CloudArrowUpIcon, PlusIcon, ArrowPathIcon } from "@heroicons/react/24/solid";
+import { getGuestMac } from "@/lib/guest";
 
 const PRESIGNED_URL_ENDPOINT = "/api/presigned-url";
 const BUCKET_NAME = "tryitproductmodels";
@@ -66,7 +67,8 @@ export default function ManualUpload({
 
       // Get signed URL from backend
       const response = await axios.get(PRESIGNED_URL_ENDPOINT, {
-        params: { bucket_name: BUCKET_NAME, file_type: "glb" },
+        params: { bucket_name: BUCKET_NAME, file_type: "glb", mac: getGuestMac() },
+        headers: { "x-guest-mac": getGuestMac() }
       });
 
       if (!response.data || !response.data.upload_url || !response.data.file_key) {
@@ -83,31 +85,8 @@ export default function ManualUpload({
         let finalKey = file_key;
         let finalBlobUrl: string | undefined = URL.createObjectURL(fileToUpload);
 
-        if (userTier === "NON_LOGGED") {
-          toast.loading(`Applying Watermark...`, { id: `upload-glb-toast`, duration: Infinity });
-          try {
-            const fd = new FormData();
-            fd.append('s3_key', finalKey);
-            fd.append('glb_url', finalUrl);
-            fd.append('width', '0');
-            fd.append('height', '0');
-            fd.append('depth', '0');
-            fd.append('unit', 'm');
-            fd.append('auto_watermark', 'true');
-            fd.append('force_watermark', 'true');
-            
-            const apiRes = await axios.post("/api/resize", fd);
-            if (apiRes.data.success) {
-               finalUrl = apiRes.data.glb_url;
-               finalKey = apiRes.data.file_key;
-               finalBlobUrl = undefined; // Force viewer to use the watermarked S3 URL
-            }
-          } catch (e) {
-            console.warn("Auto-watermark failed, continuing with original.");
-          }
-        }
-
         onGLBUpload(finalUrl, finalKey, file.name, finalBlobUrl);
+
 
         toast.success(`GLB uploaded successfully!`, {
           id: `upload-glb-toast`,
