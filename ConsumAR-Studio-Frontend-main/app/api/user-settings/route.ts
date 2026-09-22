@@ -73,7 +73,7 @@ export async function POST(request: Request) {
         usdzFile: usdzFile,
         details: dimensions ? JSON.stringify(dimensions) : null
       }
-    }).catch(e => console.error("Background history log failed:", e));
+    }).catch((e: any) => console.error("Background history log failed:", e));
 
     return NextResponse.json({ success: true });
   } catch (error: any) {

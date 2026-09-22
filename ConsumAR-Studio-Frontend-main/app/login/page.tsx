@@ -3,17 +3,18 @@ import { useState, useEffect } from "react";
 import Image from "next/image";
 import { signIn, useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import toast from "react-hot-toast";
-import { normalizeEmail, validateEmail, validatePassword } from "@/lib/auth";
+import { validateEmail } from "@/lib/auth";
 
 export default function LoginPage() {
+  const [step, setStep] = useState<"email" | "otp">("email");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [emailError, setEmailError] = useState("");
-  const [passwordError, setPasswordError] = useState("");
+  const [timeLeft, setTimeLeft] = useState(300); // 5 minutes in seconds
+
   const { status } = useSession();
   const router = useRouter();
 
@@ -24,40 +25,82 @@ export default function LoginPage() {
     }
   }, [status, router]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  // Timer for OTP
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (step === "otp" && timeLeft > 0) {
+      timer = setInterval(() => {
+        setTimeLeft((prev) => prev - 1);
+      }, 1000);
+    } else if (timeLeft === 0 && step === "otp") {
+      toast.error("Code expired. Please request a new one.");
+      setStep("email");
+      setOtp("");
+    }
+    return () => clearInterval(timer);
+  }, [step, timeLeft]);
+
+  const handleRequestLink = async (e: React.FormEvent) => {
     e.preventDefault();
     setEmailError("");
-    setPasswordError("");
 
-    if (!email || !password) {
-      toast.error("Please fill in all fields");
+    if (!email) {
+      toast.error("Please enter an email");
       return;
     }
 
     if (!validateEmail(email)) {
-      setEmailError("Invalid email format (must contain @ and .)");
-      return;
-    }
-
-    if (!validatePassword(password)) {
-      setPasswordError("Weak password: 8+ chars, 1 Uppercase, 1 Number, 1 Special (!@#$..)");
+      setEmailError("Invalid email format");
       return;
     }
 
     setIsLoading(true);
-    const cleanEmail = normalizeEmail(email);
-    const result = await signIn("credentials", {
-      email: cleanEmail,
-      password,
+
+    try {
+      const res = await fetch("/api/auth/request-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+
+      if (res.ok) {
+        toast.success("Check your inbox for the code!");
+        setStep("otp");
+        setTimeLeft(300);
+      } else {
+        const data = await res.json();
+        toast.error(data.error || "Failed to send code");
+      }
+    } catch (error) {
+      toast.error("Something went wrong");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (otp.length !== 6) {
+      toast.error("Please enter a 6-digit code");
+      return;
+    }
+
+    setIsLoading(true);
+    const result = await signIn("otp", {
+      email,
+      otp,
       redirect: false,
     });
 
     if (result?.error) {
-      toast.error("Invalid email or password");
+      const errorMessage = result.error === "CredentialsSignin" || result.error === "Credentials"
+        ? "Incorrect or expired code. Please try again."
+        : result.error;
+      toast.error(errorMessage);
       setIsLoading(false);
     } else {
       toast.success("Welcome back!");
-      router.push("/studio"); // Go to the Studio dashboard after login
+      router.push("/studio");
       router.refresh();
     }
   };
@@ -71,65 +114,96 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 p-4">
-      {/* Top Left Branding */}
-      <div className="fixed top-5 left-5 z-10 pointer-events-none">
+    <div className="flex min-h-[100dvh] flex-col items-center justify-center bg-gray-50 p-4 sm:p-6 lg:p-8 relative">
+      {/* Branding: Centered on mobile, fixed top-left on desktop */}
+      <div className="absolute top-8 left-1/2 -translate-x-1/2 md:fixed md:top-8 md:left-8 md:translate-x-0 z-10 pointer-events-none">
         <Image
           src="/TIFLabs-main.png"
           alt="TIF Labs Logo"
           width={150}
           height={50}
-          className="h-6 w-auto object-contain"
+          className="h-6 md:h-7 w-auto object-contain transition-all"
           priority
         />
       </div>
-      <div className="w-full max-w-sm rounded-[4px] border border-gray-300 bg-white p-6 shadow-sm">
-        <h1 className="mb-6 text-center text-2xl font-serif font-semibold text-gray-800">Login</h1>
-        
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-1">
-            <label className="block text-sm font-semibold text-gray-900">Email:</label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-[4px] border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
-              placeholder="email@example.com"
-              autoComplete="off"
-              required
-            />
-            {emailError && <p className="mt-0.5 text-[10px] font-medium text-red-600">{emailError}</p>}
-          </div>
 
-          <div className="space-y-1">
-            <label className="block text-sm font-semibold text-gray-900">Password:</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-[4px] border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none"
-              placeholder="password"
-              autoComplete="off"
-              required
-            />
-            {passwordError && <p className="mt-0.5 text-[10px] font-medium text-red-600">{passwordError}</p>}
-          </div>
+      {/* Added mt-12 on mobile to clear the absolute logo, removed on desktop */}
+      <div className="mt-12 md:mt-0 w-full max-w-[22rem] sm:max-w-sm rounded-lg border border-gray-200 bg-white p-5 sm:p-8 shadow-lg shadow-gray-200/50 transition-all">
+        <h1 className="mb-6 text-center text-xl sm:text-2xl font-serif font-semibold text-gray-800">Login</h1>
 
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="w-full rounded-[4px] bg-indigo-700 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-800 disabled:opacity-50"
-          >
-            {isLoading ? "Logging in..." : "Login"}
-          </button>
-        </form>
+        {step === "email" ? (
+          <form onSubmit={handleRequestLink} className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="block text-sm font-semibold text-gray-900">Email:</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full rounded-md border border-gray-300 px-3.5 py-2.5 text-sm transition-colors focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                placeholder="email@example.com"
+                autoComplete="email"
+                required
+              />
+              {emailError && <p className="mt-1 text-[11px] font-medium text-red-600">{emailError}</p>}
+            </div>
 
-        <div className="relative my-6">
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="w-full rounded-md bg-indigo-600 py-3 sm:py-2.5 text-sm font-semibold text-white transition-all hover:bg-indigo-700 active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none shadow-sm"
+            >
+              {isLoading ? "Sending..." : "Log in / Sign up"}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleVerifyOtp} className="space-y-4 text-center">
+            <p className="text-sm text-gray-600 px-2">
+              We sent a code to <br className="hidden sm:block" />
+              <span className="font-semibold text-gray-900 break-all">{email}</span>
+            </p>
+
+            <div className="space-y-1 pt-2">
+              <input
+                type="text"
+                maxLength={6}
+                value={otp}
+                onChange={(e) => setOtp(e.target.value.replace(/[^0-9]/g, ''))}
+                // Responsive text sizing and tracking for the OTP input
+                className="w-full text-center tracking-[0.3em] sm:tracking-[0.5em] text-xl sm:text-2xl font-medium rounded-md border border-gray-300 px-3 py-3 sm:py-2 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-all"
+                placeholder="------"
+                autoComplete="one-time-code"
+                required
+              />
+            </div>
+
+            <p className="text-xs text-gray-500">
+              Code expires in: <span className="font-mono font-medium text-red-500">{Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}</span>
+            </p>
+
+            <button
+              type="submit"
+              disabled={isLoading || otp.length !== 6}
+              className="w-full rounded-md bg-indigo-600 mt-2 py-3 sm:py-2.5 text-sm font-semibold text-white transition-all hover:bg-indigo-700 active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none shadow-sm"
+            >
+              {isLoading ? "Verifying..." : "Verify Code"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => { setStep("email"); setOtp(""); }}
+              className="text-xs font-medium text-indigo-600 hover:text-indigo-700 hover:underline mt-3 inline-block transition-colors"
+            >
+              Use a different email
+            </button>
+          </form>
+        )}
+
+        <div className="relative my-7">
           <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-gray-300"></div>
+            <div className="w-full border-t border-gray-200"></div>
           </div>
-          <div className="relative flex justify-center text-[10px] uppercase">
-            <span className="bg-white px-2 text-gray-500">Or continue with</span>
+          <div className="relative flex justify-center text-[10px] sm:text-xs uppercase tracking-wider font-semibold">
+            <span className="bg-white px-3 text-gray-400">Or continue with</span>
           </div>
         </div>
 
@@ -140,10 +214,10 @@ export default function LoginPage() {
             setIsGoogleLoading(true);
             signIn("google", { callbackUrl: "/studio" });
           }}
-          className="flex w-full items-center justify-center gap-3 rounded-[4px] border border-gray-300 bg-white py-2 px-4 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-50 mb-4 disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-3 rounded-md border border-gray-200 bg-white py-2.5 sm:py-2 px-4 text-sm font-semibold text-gray-700 transition-all hover:bg-gray-50 hover:border-gray-300 active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none shadow-sm"
         >
           {isGoogleLoading ? (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 py-0.5">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"></div>
               <span>Connecting...</span>
             </div>
@@ -159,13 +233,6 @@ export default function LoginPage() {
             </>
           )}
         </button>
-
-        <p className="mt-6 text-center text-xs text-gray-600">
-          Don't have an account?{" "}
-          <Link href="/signup" className="font-medium text-indigo-600 hover:text-indigo-500 underline">
-            Signup
-          </Link>
-        </p>
       </div>
     </div>
   );

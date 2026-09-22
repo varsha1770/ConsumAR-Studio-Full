@@ -15,10 +15,20 @@ import EditorControls from "./EditorControls";
 import FaqSection from "./FaqSection";
 import { getGuestMac } from "@/lib/guest";
 
-const toProxied = (url: string | null): string | null => {
-  if (!url) return null;
-  if (url.startsWith('blob:') || url.startsWith('/api/proxy-model')) return url;
-  return `/api/proxy-model?url=${encodeURIComponent(url)}`;
+const toProxied = (url: string | null | undefined): string | null => {
+  if (!url || typeof url !== 'string') return null;
+  // Rule: If it starts with "/", it's a local file. NO PROXY NEEDED.
+  if (url.startsWith('/')) {
+    return url;
+  }
+  
+  // V20: Apple AR Quick Look URL Fix + CORS Bypass (Base64 path encoding with chunking)
+  // We must proxy ALL S3 URLs through Next.js because the glb-output bucket lacks frontend CORS headers.
+  const isUsdz = url.toLowerCase().includes('.usdz');
+  const ext = isUsdz ? '.usdz' : '.glb';
+  const encodedUrl = btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const chunks = encodedUrl.match(/.{1,200}/g)?.join('/') || encodedUrl;
+  return `/api/proxy-model/${chunks}/file${ext}`;
 };
 
 const unitLabel: Record<string, string> = { millimeters: "mm", centimeters: "cm", inches: "in", feet: "ft", meters: "m" };
@@ -51,10 +61,12 @@ export default function UploadSection() {
   const [usageStats, setUsageStats] = useState<any>(null);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [upgradeMessage, setUpgradeMessage] = useState("");
-  const [hasLoadError, setHasLoadError] = useState(false);
   const [forceWatermark, setForceWatermark] = useState(false);
   const [watermarkText, setWatermarkText] = useState("TryitFirstLabs");
+  const [hasLoadError, setHasLoadError] = useState(false);
   const [previewVersion, setPreviewVersion] = useState(0);
+
+  const isSampleModel = !!originalGlbUrl && originalGlbUrl.startsWith('/') && !originalGlbUrl.startsWith('/api');
 
   const isSuperAdmin = userTier === "SUPER_ADMIN" || (session?.user as any)?.isAdmin === true;
 
@@ -75,25 +87,30 @@ export default function UploadSection() {
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, []);
 
-  // Fetch Limits
-  useEffect(() => {
-    const fetchLimits = async () => {
-      try {
-        const res = await axios.get("/api/user/limits", {
-          params: { mac: getGuestMac() },
-          headers: { "x-guest-mac": getGuestMac() }
-        });
-        if (res.data.success) {
-          setUserTier(res.data.tier);
-          setUsageStats(res.data.usage);
-          if (res.data.tier === "NON_LOGGED") {
-            setDimensionUnit("centimeters");
-          }
+  const fetchLimits = useCallback(async (forSample = false) => {
+    try {
+      const endpoint = forSample ? "/api/sample-upload" : "/api/user/limits";
+      const res = await axios.get(endpoint, {
+        params: { mac: getGuestMac() },
+        headers: { "x-guest-mac": getGuestMac() },
+        validateStatus: (status) => status < 500
+      });
+      if (res.data?.success) {
+        if (!forSample && res.data.tier) setUserTier(res.data.tier);
+        if (res.data.usage) setUsageStats(res.data.usage);
+        if (!forSample && res.data.tier === "NON_LOGGED") {
+          setDimensionUnit("centimeters");
         }
-      } catch (err) { console.error("Failed to fetch limits", err); }
-    };
-    fetchLimits();
-  }, [session]);
+      }
+    } catch (err) {
+      // Graceful quiet catch for network re-connects
+    }
+  }, []);
+
+  // Fetch Limits on mount, session change, or when switching between sample/normal models
+  useEffect(() => {
+    fetchLimits(isSampleModel);
+  }, [session, isSampleModel, fetchLimits]);
 
   // Settings Loader
   const hasLoadedSettings = useRef(false);
@@ -124,6 +141,17 @@ export default function UploadSection() {
       loadSettings();
     }
   }, [session]);
+
+  // Auto-convert USDZ on initial mount if a model exists but has no convertedUsdzUrl yet
+  const hasTriggeredMountUsdz = useRef(false);
+  useEffect(() => {
+    if (!convertedUsdzUrl && !hasTriggeredMountUsdz.current) {
+      const urlToUse = glbFile || localGlbUrl || originalGlbUrl || '/sample2.glb';
+      const keyToUse = glbFileKey || originalGlbKey || 'sample2.glb';
+      hasTriggeredMountUsdz.current = true;
+      autoConvertUSDZ(urlToUse, keyToUse);
+    }
+  }, [glbFile, glbFileKey, convertedUsdzUrl, localGlbUrl, originalGlbUrl, originalGlbKey]);
 
   const saveSettings = async (overrides = {}) => {
     if (!session) return;
@@ -156,9 +184,29 @@ export default function UploadSection() {
     }, 2000);
   };
 
-  const handleGLBUpload = (fileUrl: string, fileKey: string, fileName: string, fileBlobUrl?: string) => {
+  const handleGLBUpload = async (fileUrl: string, fileKey: string, fileName: string, fileBlobUrl?: string) => {
+    const isSample = fileUrl.startsWith('/') && !fileUrl.startsWith('/api');
+    if (isSample) {
+      try {
+        const res = await axios.post('/api/sample-upload', {}, { headers: { "x-guest-mac": getGuestMac() } });
+        if (!res.data.success) {
+           toast.error(res.data.error || "Sample upload limit reached");
+           return;
+        } else if (res.data.usage) {
+           setUsageStats(res.data.usage);
+        }
+      } catch (err: any) {
+        if (err.response?.status === 403) {
+           toast.error(err.response.data.error || "Sample upload limit reached");
+        } else {
+           toast.error("Failed to load sample model.");
+        }
+        return;
+      }
+    }
+
     console.log("[Studio] New Upload:", { fileUrl, fileKey, fileName, hasBlob: !!fileBlobUrl });
-    const cleanUrl = fileUrl.split('?')[0];
+    const cleanUrl = fileUrl; // V178: Do NOT strip the AWS signature!
     setGlbFile(cleanUrl);
     setGlbFileKey(fileKey);
     setGlbFileName(fileName);
@@ -177,8 +225,18 @@ export default function UploadSection() {
     const initialDims = { length: `0${unitSuffix}`, width: `0${unitSuffix}`, height: `0${unitSuffix}` };
     setDimensions(initialDims);
     setScaleValue("");
-    setConvertedUsdzUrl(null);
+    let initialUsdz: string | null = null;
+    if ((cleanUrl && cleanUrl.includes("sample1")) || (fileKey && fileKey.includes("sample-model-1"))) initialUsdz = "/sample1.usdz";
+    else if ((cleanUrl && cleanUrl.includes("sample2")) || (fileKey && fileKey.includes("sample-model-2"))) initialUsdz = "/sample2.usdz";
+    else if ((cleanUrl && cleanUrl.includes("sample3")) || (fileKey && fileKey.includes("sample-model-3"))) initialUsdz = "/sample3.usdz";
+
+    setConvertedUsdzUrl(initialUsdz);
     saveSettings({ glbFile: cleanUrl, glbFileKey: fileKey, glbFileName: fileName, dimensions: initialDims, scaleValue: "" });
+
+    // Trigger auto conversion in background
+    if (fileKey && cleanUrl) {
+      autoConvertUSDZ(cleanUrl, fileKey);
+    }
   };
 
   const convertDimension = (value: string, fromUnit: string, toUnit: string): string => {
@@ -232,22 +290,34 @@ export default function UploadSection() {
     let w = parseFloat(dimensionInputs.width) || 0;
     let h = parseFloat(dimensionInputs.height) || 0;
 
-    if (resizeMode === "scale" && scaleValue && parseFloat(scaleValue) > 0) {
-      const s = parseFloat(scaleValue);
+    if (resizeMode === "scale") {
+      const s = parseFloat(scaleValue) || 1.0;
       const toMm: Record<string, number> = { millimeters: 1, centimeters: 10, inches: 25.4, feet: 304.8, meters: 1000 };
 
-      const origL = parseFloat(originalDimensions?.length) || 0;
-      const origW = parseFloat(originalDimensions?.width) || 0;
-      const origH = parseFloat(originalDimensions?.height) || 0;
+      const baseDims = lastAppliedDimensions || originalDimensions;
+      const origL = parseFloat(baseDims?.length) || 0;
+      const origW = parseFloat(baseDims?.width) || 0;
+      const origH = parseFloat(baseDims?.height) || 0;
 
-      // V176: Smart Normalization Fix. Use 10.0 threshold to match EditorControls
-      const isHuge = (origL > 10.0 || origW > 10.0 || origH > 10.0);
-      const normalizer = isHuge ? 0.01 : 1.0;
-      const unitFactor = 1000 / (toMm[dimensionUnit] || 1000);
+      // V176: Robust Unit Handling. Use originalDimensionUnit if available.
+      let actualOrigUnit = originalDimensionUnit || "meters";
+      if (actualOrigUnit === "meters" && (origL > 10.0 || origW > 10.0 || origH > 10.0)) {
+        actualOrigUnit = "centimeters";
+      }
 
-      l = origL * normalizer * s * unitFactor;
-      w = origW * normalizer * s * unitFactor;
-      h = origH * normalizer * s * unitFactor;
+      const valInMm = origL * (toMm[actualOrigUnit] || 1000);
+      const targetFactor = 1 / (toMm[dimensionUnit] || 1000);
+      const rawVal = valInMm * targetFactor;
+
+      l = rawVal * s;
+
+      const valWInMm = origW * (toMm[actualOrigUnit] || 1000);
+      const rawValW = valWInMm * targetFactor;
+      w = rawValW * s;
+
+      const valHInMm = origH * (toMm[actualOrigUnit] || 1000);
+      const rawValH = valHInMm * targetFactor;
+      h = rawValH * s;
     }
 
     const formatValue = (val: number) => {
@@ -300,6 +370,8 @@ export default function UploadSection() {
       fd.append('width', l.toString());
       fd.append('height', h.toString());
       fd.append('depth', w.toString());
+      fd.append('mode', resizeMode === 'scale' ? 'uniform' : 'non-uniform');
+      fd.append('is_sample_model', (typeof isSampleModel !== 'undefined' ? isSampleModel : false).toString());
       const unitMap: Record<string, string> = { feet: "ft", inches: "in", centimeters: "cm", meters: "m", millimeters: "mm" };
       fd.append('unit', unitMap[dimensionUnit] || "m");
       fd.append('tier', userTier);
@@ -321,10 +393,10 @@ export default function UploadSection() {
         return null;
       }
       if (apiRes.data.success) {
-        console.log("[Studio] Resize Success:", apiRes.data.glb_url);
-        // V176: Add cache-busting timestamp and increment version to force component reboot
-        const freshUrl = `${apiRes.data.glb_url}${apiRes.data.glb_url.includes('?') ? '&' : '?'}v=${Date.now()}`;
-        const proxiedUrl = toProxied(freshUrl);
+        const resultGlbUrl = apiRes.data.glb_url || apiRes.data.file_url || apiRes.data.url;
+        console.log("[Studio] Resize Success:", resultGlbUrl);
+        // V177: Do NOT append ?v=timestamp to AWS Presigned URLs because it invalidates the signature!
+        const proxiedUrl = toProxied(resultGlbUrl);
         setLocalGlbUrl(proxiedUrl);
         setGlbFile(proxiedUrl);
         setGlbFileKey(apiRes.data.file_key);
@@ -340,6 +412,10 @@ export default function UploadSection() {
         if (apiRes.data.usage) setUsageStats(apiRes.data.usage);
         toast.success("Done!", { id: "res" });
         saveSettings({ glbFile: proxiedUrl, glbFileKey: apiRes.data.file_key, dimensions: liveDimensions, dimensionUnit, scaleValue: "" });
+        
+        // Trigger auto conversion for the resized model
+        autoConvertUSDZ(resultGlbUrl, apiRes.data.file_key);
+        
         return proxiedUrl;
       }
       return null;
@@ -364,6 +440,8 @@ export default function UploadSection() {
         height: (originalDimensions.height * factor).toFixed(2)
       });
     }
+    setLastAppliedDimensions(null);
+    setOriginalDimensionUnit("meters");
     setScaleValue("");
     setConvertedUsdzUrl(null);
     toast.success("Reset Complete!");
@@ -407,26 +485,83 @@ export default function UploadSection() {
     }
   };
 
-  const handleConvert = async () => {
-    if (isConvertingUSDZ || !glbFileKey) return;
+  const autoConvertUSDZ = async (glbUrlToUse?: string | null, s3Key?: string | null) => {
+    if (!glbUrlToUse || !s3Key) return;
+    try {
+      const urlStr = String(glbUrlToUse);
+      const keyStr = String(s3Key);
+
+      if (urlStr.includes("sample1") || keyStr.includes("sample-model-1")) {
+        setConvertedUsdzUrl("/sample1.usdz");
+        return;
+      }
+      if (urlStr.includes("sample2") || keyStr.includes("sample-model-2")) {
+        setConvertedUsdzUrl("/sample2.usdz");
+        return;
+      }
+      if (urlStr.includes("sample3") || keyStr.includes("sample-model-3")) {
+        setConvertedUsdzUrl("/sample3.usdz");
+        return;
+      }
+
+      const fdUsdz = new FormData();
+      fdUsdz.append("s3_key", s3Key);
+      fdUsdz.append("tier", userTier);
+      fdUsdz.append("is_download", "false"); 
+      fdUsdz.append("watermark", "true");
+      fdUsdz.append("watermark_text", watermarkText);
+      
+      const isServerUrl = (u: string | null) => !!u && (u.startsWith("http://localhost") || u.startsWith("http://127.0.0.1"));
+      let glbUrlToSend = isServerUrl(glbUrlToUse) ? glbUrlToUse : glbUrlToUse;
+      if (glbUrlToSend && glbUrlToSend.startsWith('/')) {
+        glbUrlToSend = window.location.origin + glbUrlToSend;
+      }
+      fdUsdz.append("glb_url", glbUrlToSend);
+      fdUsdz.append("is_sample_model", (typeof isSampleModel !== 'undefined' ? isSampleModel : false).toString());
+      
+      const usdzRes = await axios.post("/api/convert-usdz", fdUsdz, {
+        validateStatus: (status) => status < 600,
+        headers: { "x-guest-mac": getGuestMac() }
+      });
+
+      if (usdzRes.status === 403) {
+        triggerUpgrade(usdzRes.data.error || "Daily USDZ conversion limit reached.");
+        return;
+      }
+
+      if (usdzRes.status === 200 && usdzRes.data?.success) {
+         const usdzUrl = usdzRes.data.usdz_url || usdzRes.data.file_url || usdzRes.data.url;
+         setConvertedUsdzUrl(usdzUrl);
+      }
+    } catch (e) {
+      console.error("Auto USDZ Conversion Failed:", e);
+    }
+  };
+
+  const handleConvert = async (isOriginal: boolean = false) => {
+    if (isConvertingUSDZ || (!glbFileKey && !isOriginal)) return;
     const toastId = "usdz-process";
     setIsConvertingUSDZ(true);
     try {
       toast.loading("Starting conversion...", { id: toastId });
       const fd = new FormData();
-      fd.append("s3_key", glbFileKey);
+      fd.append("s3_key", isOriginal ? (originalGlbKey || "") : (glbFileKey || ""));
       fd.append("tier", userTier);
       fd.append("is_download", "true");
       fd.append("watermark", "true");
       fd.append("watermark_text", watermarkText);
+      fd.append('is_sample_model', (typeof isSampleModel !== 'undefined' ? isSampleModel : false).toString());
 
       const isServerUrl = (u: string | null) => !!u && (u.startsWith("http://localhost") || u.startsWith("http://127.0.0.1"));
-      const glbUrlToSend = isServerUrl(localGlbUrl) ? localGlbUrl : glbFile;
+      let glbUrlToSend = isServerUrl(localGlbUrl) ? localGlbUrl : glbFile;
+      if (glbUrlToSend && glbUrlToSend.startsWith('/')) {
+        glbUrlToSend = window.location.origin + glbUrlToSend;
+      }
       if (glbUrlToSend) fd.append("glb_url", glbUrlToSend);
 
       toast.loading("Processing USDZ... This may take a minute.", { id: toastId });
       const res = await axios.post("/api/convert-usdz", fd, {
-        validateStatus: (status) => status < 500,
+        validateStatus: (status) => status < 600,
         headers: { "x-guest-mac": getGuestMac() }
       });
 
@@ -439,7 +574,7 @@ export default function UploadSection() {
 
       if (!res.data || !res.data.success) throw new Error(res.data?.error || "Backend failure");
 
-      const downloadUrl = res.data.file_url || res.data.url;
+      const downloadUrl = res.data.usdz_url || res.data.file_url || res.data.url;
       setConvertedUsdzUrl(downloadUrl);
       if (res.data.usage) setUsageStats(res.data.usage);
 
@@ -463,13 +598,13 @@ export default function UploadSection() {
 
     setOriginalDimensions((prev: any) => {
       if (prev) return prev;
+      setOriginalDimensionUnit("meters"); // ONLY set unit to meters if we are detecting for the first time
       return { length: d.length, width: d.width, height: d.height };
     });
     setLastAppliedDimensions((prev: any) => {
       if (prev) return prev;
       return { length: d.length, width: d.width, height: d.height };
     });
-    setOriginalDimensionUnit("meters");
   }, []); // Empty dependency array to stay stable
 
   const handleRemoveWatermark = () => {
@@ -508,24 +643,37 @@ export default function UploadSection() {
 
   if (!glbFile || hasLoadError) {
     return (
-      <div className="w-full">
+      <div className="w-full flex flex-col">
         {hasLoadError && (
-          <div className="max-w-4xl mx-auto mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-4 animate-in fade-in slide-in-from-top-4">
-            <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center text-red-600">
-              <CubeTransparentIcon className="w-6 h-6" />
-            </div>
-            <div>
-              <p className="text-sm font-bold text-red-900">Broken Model Detected</p>
-              <p className="text-xs text-red-600">Your previous model couldn't be loaded. Resetting to upload page...</p>
+          /* Added responsive horizontal padding so the banner doesn't touch the screen edges on mobile */
+          <div className="w-full px-4 sm:px-6 lg:px-8 pt-4 sm:pt-6">
+            <div className="max-w-4xl mx-auto mb-2 sm:mb-6 p-3 sm:p-4 bg-red-50 border border-red-100 rounded-xl sm:rounded-2xl flex flex-row items-center gap-3 sm:gap-4 animate-in fade-in slide-in-from-top-4 shadow-sm">
+
+              {/* Added shrink-0 so the icon never gets squished by long text on small screens */}
+              <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-red-100 flex items-center justify-center text-red-600 shrink-0">
+                <CubeTransparentIcon className="w-4 h-4 sm:w-6 sm:h-6" />
+              </div>
+
+              <div className="flex flex-col">
+                <p className="text-xs sm:text-sm font-bold text-red-900 leading-tight">
+                  Broken Model Detected
+                </p>
+                <p className="text-[10px] sm:text-xs text-red-600 mt-0.5 sm:mt-1 leading-snug">
+                  Your previous model couldn't be loaded. Resetting to upload page...
+                </p>
+              </div>
+
             </div>
           </div>
         )}
+
         <HeroSection
           glbFile={glbFile}
           glbFileName={glbFileName}
           handleGLBUpload={handleGLBUpload}
           userTier={userTier}
           isOverUploadLimit={!isSuperAdmin && usageStats && usageStats.uploads >= usageStats.maxUploads}
+          setGlbFile={setGlbFile}
         />
         <FaqSection />
       </div>
@@ -533,13 +681,34 @@ export default function UploadSection() {
   }
 
   return (
-    <div className="glass-card rounded-[2rem] p-4 sm:p-6 animate-in zoom-in-95 duration-500">
-      <div className="flex flex-col lg:flex-row gap-8 items-start w-full px-4">
-        <div className="flex-1 flex flex-col min-h-[500px] lg:min-h-[500px] relative">
-          <div className="flex-1 relative flex flex-col">
+    <div className="glass-card rounded-2xl sm:rounded-[2rem] p-3 sm:p-6 w-full animate-in zoom-in-95 duration-500 overflow-visible mb-20 md:mb-0">
+
+      {/* Top action bar */}
+      <div className="w-full flex justify-between items-center mb-4 px-1 sm:px-4">
+        <button
+          onClick={clearBrokenModel}
+          className="flex items-center gap-2 px-4 py-2 bg-white text-gray-700 hover:bg-gray-50 border border-gray-200 hover:border-gray-300 rounded-xl font-semibold text-sm transition-all shadow-sm active:scale-95"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          </svg>
+          Back to Uploads
+        </button>
+      </div>
+
+      <div className="flex flex-col lg:flex-row gap-8 lg:gap-8 items-start w-full px-1 sm:px-4">
+
+        {/* LEFT SIDE: 3D Viewer Container */}
+        {/* FIX 1: Removed flex-1 from the wrapper so it doesn't arbitrarily collapse on mobile */}
+        <div className="w-full lg:flex-1 flex flex-col relative shrink-0">
+
+          {/* FIX 2: Applied strict h-[...] instead of min-h to physically force the box open on all devices */}
+          <div className="relative w-full h-[350px] sm:h-[450px] lg:h-[500px] rounded-xl overflow-hidden shadow-inner bg-gray-50/50 border border-gray-100">
             <ModelPreview3D
               key={`${glbFileKey || "no-model"}-${previewVersion}`}
               glbUrl={localGlbUrl || toProxied(glbFile)!}
+              publicGlbUrl={toProxied(glbFile) || undefined}
+              usdzUrl={convertedUsdzUrl}
               dimensions={debouncedDimensions}
               currentUnit={dimensionUnit}
               onModelDimensionsDetected={handleDetected}
@@ -549,8 +718,28 @@ export default function UploadSection() {
               userTier={userTier}
               isAdmin={isSuperAdmin}
             />
+
+            {/* Loading Overlay - Moved inside the strict height box so it perfectly covers the viewer */}
+            {isResizing && (
+              <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-[2500] flex flex-col items-center justify-center transition-all">
+                <div className="relative">
+                  <div className="w-12 h-12 sm:w-16 sm:h-16 border-4 border-blue-200 border-t-purple-600 rounded-full animate-spin"></div>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="w-6 h-6 sm:w-8 sm:h-8 bg-gradient-to-br from-blue-600 to-purple-600 rounded-full animate-pulse"></div>
+                  </div>
+                </div>
+                <div className="mt-3 sm:mt-4 flex flex-col items-center animate-bounce">
+                  <p className="text-xs sm:text-sm font-black bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent uppercase tracking-[0.2em] text-center px-4">
+                    Optimizing Model
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
-          <div className="absolute -right-5 top-1/2 -translate-y-1/2 z-[3000]">
+
+          {/* Floating Replacer Button */}
+          {/* Snapped to the bottom-right of the 3D viewer box so it doesn't float randomly off-screen */}
+          <div className="absolute -bottom-4 right-2 sm:-bottom-5 sm:right-4 lg:top-1/2 lg:-translate-y-1/2 lg:-right-6 z-[3000]">
             <ManualUpload
               onGLBUpload={handleGLBUpload}
               currentGlbUrl={glbFile}
@@ -560,98 +749,113 @@ export default function UploadSection() {
               isOverUploadLimit={!isSuperAdmin && usageStats && usageStats.uploads >= usageStats.maxUploads}
             />
           </div>
-          {isResizing && (
-            <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-[2500] flex flex-col items-center justify-center rounded-xl">
-              <div className="relative">
-                <div className="w-16 h-16 border-4 border-blue-200 border-t-purple-600 rounded-full animate-spin"></div>
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="w-8 h-8 bg-gradient-to-br from-blue-600 to-purple-600 rounded-full animate-pulse"></div>
-                </div>
-              </div>
-              <div className="mt-4 flex flex-col items-center animate-bounce">
-                <p className="text-sm font-black bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent uppercase tracking-[0.2em]">Optimizing Model</p>
-              </div>
-            </div>
-          )}
         </div>
 
-        <EditorControls
-          dimensionUnit={dimensionUnit}
-          handleUnitChange={handleUnitChange}
-          resizeMode={resizeMode}
-          setResizeMode={setResizeMode}
-          scaleValue={scaleValue}
-          setScaleValue={setScaleValue}
-          incrementScale={incrementScale}
-          decrementScale={decrementScale}
-          dimensionInputs={dimensionInputs}
-          setDimensionInputs={setDimensionInputs}
-          unitLabel={unitLabel}
-          userTier={userTier}
-          isSuperAdmin={isSuperAdmin}
-          usageStats={usageStats}
-          isResizing={isResizing}
-          glbFileKey={glbFileKey}
-          originalDimensions={lastAppliedDimensions || originalDimensions}
-          originalDimensionUnit={originalDimensionUnit}
-          rawModelDimensions={rawModelDimensions}
-          glbFile={glbFile}
-          handleApply={handleApply}
-          handleReset={handleReset}
-          handleDownload={handleDownload}
-          handleConvert={handleConvert}
-          handleRemoveWatermark={handleRemoveWatermark}
-          toProxied={toProxied}
-          triggerUpgrade={triggerUpgrade}
-          forceWatermark={forceWatermark}
-          setForceWatermark={setForceWatermark}
-          watermarkText={watermarkText}
-          setWatermarkText={setWatermarkText}
-        />
+        {/* RIGHT SIDE: Editor Controls */}
+        {/* FIX 3: Added pb-24 on mobile so the bottom buttons aren't hidden behind the sticky navbar */}
+        <div className="w-full lg:w-[350px] xl:w-[380px] shrink-0 mt-6 sm:mt-8 lg:mt-0 pb-24 md:pb-0">
+          <EditorControls
+            dimensionUnit={dimensionUnit}
+            handleUnitChange={handleUnitChange}
+            resizeMode={resizeMode}
+            setResizeMode={setResizeMode}
+            scaleValue={scaleValue}
+            setScaleValue={setScaleValue}
+            incrementScale={incrementScale}
+            decrementScale={decrementScale}
+            dimensionInputs={dimensionInputs}
+            setDimensionInputs={setDimensionInputs}
+            unitLabel={unitLabel}
+            userTier={userTier}
+            isSuperAdmin={isSuperAdmin}
+            usageStats={usageStats}
+            isResizing={isResizing}
+            glbFileKey={glbFileKey}
+            originalDimensions={lastAppliedDimensions || originalDimensions}
+            originalDimensionUnit={originalDimensionUnit}
+            rawModelDimensions={rawModelDimensions}
+            glbFile={glbFile}
+            originalGlbKey={originalGlbKey}
+            handleConvertOriginal={() => handleConvert(true)}
+            handleConvert={handleConvert}
+            handleApply={handleApply}
+            handleReset={handleReset}
+            handleDownload={handleDownload}
+            handleRemoveWatermark={handleRemoveWatermark}
+            toProxied={toProxied}
+            triggerUpgrade={triggerUpgrade}
+            forceWatermark={forceWatermark}
+            setForceWatermark={setForceWatermark}
+            watermarkText={watermarkText}
+            setWatermarkText={setWatermarkText}
+            isSampleModel={isSampleModel}
+            convertedUsdzUrl={convertedUsdzUrl}
+          />
+        </div>
       </div>
 
+      {/* UPGRADE MODAL */}
       {showUpgradeModal && (
-        <div className="fixed inset-0 z-[6000] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl p-8 max-w-sm w-full mx-4 shadow-2xl relative">
-            <button onClick={() => setShowUpgradeModal(false)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-800 font-bold text-xl">&times;</button>
-            <div className="w-16 h-16 rounded-full bg-gradient-to-r from-blue-500 to-purple-600 flex items-center justify-center mx-auto mb-4 text-white">
-              <CubeTransparentIcon className="w-8 h-8" />
+        <div className="fixed inset-0 z-[6000] flex items-center justify-center p-4 sm:p-6 bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
+          <div className="bg-white rounded-[2rem] p-6 sm:p-8 max-w-sm w-full shadow-2xl relative animate-in zoom-in-95 duration-300">
+            <button
+              onClick={() => setShowUpgradeModal(false)}
+              className="absolute top-4 sm:top-5 right-4 sm:right-5 p-2 text-gray-400 hover:text-gray-800 hover:bg-gray-100 rounded-full transition-colors"
+            >
+              <span className="text-2xl font-bold leading-none">&times;</span>
+            </button>
+
+            <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl sm:rounded-[1.5rem] bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center mx-auto mb-4 sm:mb-5 text-white shadow-lg shadow-purple-500/30">
+              <CubeTransparentIcon className="w-7 h-7 sm:w-8 sm:h-8" />
             </div>
-            <h3 className="text-2xl font-black text-center text-gray-900 mb-2">{userTier === "NON_LOGGED" ? "Daily Limit Reached" : "Pro Limit Reached"}</h3>
-            <div className="bg-red-50 border border-red-100 rounded-lg p-3 mb-6">
-              <p className="text-red-700 text-center text-[11px] font-bold leading-tight">⚠️ {upgradeMessage}</p>
+
+            <h3 className="text-xl sm:text-2xl font-black text-center text-gray-900 mb-2 sm:mb-3">
+              {userTier === "NON_LOGGED" ? "Daily Limit Reached" : "Pro Limit Reached"}
+            </h3>
+
+            <div className="bg-red-50 border border-red-100 rounded-xl p-3 mb-5 sm:mb-6">
+              <p className="text-red-700 text-center text-[10px] sm:text-[11px] font-bold leading-relaxed px-2">
+                ⚠️ {upgradeMessage}
+              </p>
             </div>
-            <div className="space-y-4 mb-8">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-lg bg-green-50 flex items-center justify-center text-green-600"><CheckCircleIcon className="w-5 h-5" /></div>
-                <div><p className="text-xs font-black text-gray-900">250 Monthly Rescales</p></div>
+
+            <div className="space-y-3 sm:space-y-4 mb-6 sm:mb-8 px-2 sm:px-4">
+              <div className="flex items-center gap-3 sm:gap-4">
+                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-green-50 flex items-center justify-center text-green-600 shrink-0">
+                  <CheckCircleIcon className="w-4 h-4 sm:w-5 sm:h-5" />
+                </div>
+                <div><p className="text-xs sm:text-sm font-black text-gray-900">250 Monthly Rescales</p></div>
               </div>
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center text-blue-600"><CheckCircleIcon className="w-5 h-5" /></div>
-                <div><p className="text-xs font-black text-gray-900">Unlimited USDZ & AR</p></div>
+              <div className="flex items-center gap-3 sm:gap-4">
+                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-blue-50 flex items-center justify-center text-blue-600 shrink-0">
+                  <CheckCircleIcon className="w-4 h-4 sm:w-5 sm:h-5" />
+                </div>
+                <div><p className="text-xs sm:text-sm font-black text-gray-900">Unlimited USDZ & AR</p></div>
               </div>
             </div>
-            <div className="flex flex-col gap-3">
+
+            <div className="flex flex-col gap-3 w-full">
               {userTier === "NON_LOGGED" ? (
-                <button onClick={() => { setShowUpgradeModal(false); router.push('/signup'); }} className="w-full py-3 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold shadow-lg">Sign Up to Continue</button>
+                <button
+                  onClick={() => { setShowUpgradeModal(false); router.push('/login'); }}
+                  className="w-full py-3.5 sm:py-4 rounded-xl sm:rounded-2xl bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold text-sm sm:text-base shadow-lg hover:shadow-xl active:scale-[0.98] transition-all"
+                >
+                  Sign In / Sign Up
+                </button>
               ) : (
-                <button onClick={() => { setShowUpgradeModal(false); document.getElementById('pricing')?.scrollIntoView({ behavior: 'smooth' }); }} className="w-full py-3 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold shadow-lg">Upgrade to Pro</button>
+                <button
+                  onClick={() => { setShowUpgradeModal(false); document.getElementById('pricing')?.scrollIntoView({ behavior: 'smooth' }); }}
+                  className="w-full py-3.5 sm:py-4 rounded-xl sm:rounded-2xl bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold text-sm sm:text-base shadow-lg hover:shadow-xl active:scale-[0.98] transition-all"
+                >
+                  Upgrade to Pro
+                </button>
               )}
             </div>
           </div>
         </div>
       )}
 
-      {/* Emergency Recovery Button - Only visible when stuck */}
-      {glbFile && (
-        <button
-          onClick={clearBrokenModel}
-          className="fixed bottom-4 left-4 z-[4000] px-3 py-1.5 bg-gray-900/50 hover:bg-gray-900 text-white text-[10px] font-bold rounded-lg backdrop-blur-sm transition-all flex items-center gap-2 opacity-50 hover:opacity-100"
-        >
-          <ArrowPathIcon className="w-3 h-3" />
-          Reset Editor
-        </button>
-      )}
+
     </div>
   );
 }

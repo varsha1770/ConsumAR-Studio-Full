@@ -6,6 +6,7 @@ import StudioHeader from "@/components/StudioHeader";
 import UploadSection from "@/components/UploadSection";
 import GenerateSection from "@/components/GenerateSection";
 import Pricing from "@/components/Pricing";
+import UserCommentSection from "@/components/UserCommentSection";
 import { Toaster } from "react-hot-toast";
 
 export default function StudioPage() {
@@ -26,17 +27,26 @@ export default function StudioPage() {
   }
 
   return (
-    <main className="h-screen overflow-auto no-scrollbar bg-gradient-to-br from-blue-100 via-purple-100 to-blue-100">
+    <main className="h-[100dvh] overflow-auto no-scrollbar bg-gradient-to-br from-blue-100 via-purple-100 to-blue-100">
       <Toaster position="top-center" />
       <StudioHeader />
-      
-      <div className="container mx-auto px-3 sm:px-5 md:px-6 py-1.5 sm:py-2 max-w-7xl">
 
-        <div className="relative">
+      {/* Adjusted padding for better breathing room and added a flex-col layout to manage spacing between sections */}
+      <div className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-7xl flex flex-col gap-10 md:gap-16">
+
+        <div className="relative w-full">
           <UploadSection />
         </div>
 
-        <Pricing />
+        <div className="w-full">
+          <Pricing />
+        </div>
+
+        {/* USER COMMENT & COMMUNITY FEEDBACK SECTION ABOVE FOOTER */}
+        <div className="w-full pb-16">
+          <UserCommentSection />
+        </div>
+
       </div>
     </main>
   );

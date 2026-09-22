@@ -1,9 +1,7 @@
 import { WebIO } from "@gltf-transform/core";
 import { KHRONOS_EXTENSIONS } from "@gltf-transform/extensions";
 import { draco, quantize, weld, dedup } from "@gltf-transform/functions";
-// @ts-ignore
-import draco3d from "draco3d";
-
+// draco3d will be dynamically imported to avoid SSR/Turbopack issues with fs/path
 export async function compressGLB(file: File): Promise<File> {
   // Read the file into an ArrayBuffer
   const arrayBuffer = await file.arrayBuffer();
@@ -15,6 +13,7 @@ export async function compressGLB(file: File): Promise<File> {
   ]);
 
   // Initialize Draco modules using the fetched WebAssembly binaries
+  const draco3d = await import("draco3d").then(m => m.default || m);
   const decoderModule = await draco3d.createDecoderModule({ wasmBinary: decoderWasm });
   const encoderModule = await draco3d.createEncoderModule({ wasmBinary: encoderWasm });
 
@@ -63,6 +62,7 @@ export async function decompressGLBIfDraco(file: File): Promise<File> {
       fetch("https://unpkg.com/draco3d@1.5.7/draco_encoder.wasm").then((r) => r.arrayBuffer()),
     ]);
 
+    const draco3d = await import("draco3d").then(m => m.default || m);
     const decoderModule = await draco3d.createDecoderModule({ wasmBinary: decoderWasm });
     const encoderModule = await draco3d.createEncoderModule({ wasmBinary: encoderWasm });
 
@@ -99,6 +99,7 @@ export async function processModelLocally(
     fetch("https://unpkg.com/draco3d@1.5.7/draco_encoder.wasm").then((r) => r.arrayBuffer()),
   ]);
 
+  const draco3d = await import("draco3d").then(m => m.default || m);
   const decoderModule = await draco3d.createDecoderModule({ wasmBinary: decoderWasm });
   const encoderModule = await draco3d.createEncoderModule({ wasmBinary: encoderWasm });
 

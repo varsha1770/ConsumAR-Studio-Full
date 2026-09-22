@@ -8,7 +8,7 @@ def apply_lifecycle_rules():
     s3_client = boto3.client('s3')
     
     # The buckets used by the application
-    buckets = ['tryitproductmodels', 'glb-output']
+    buckets = ['voxel-vista', 'glb-output']
     
     lifecycle_configuration = {
         'Rules': [

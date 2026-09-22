@@ -17,10 +17,25 @@ import LoaderAnimation from "../animations/Loader.json";
 import ModelPreview3D from "./ModelPreview3D";
 import toast from "react-hot-toast";
 import axios from "axios";
+import { getGuestMac } from "../lib/guest";
+import { QRCodeSVG } from 'qrcode.react';
 
 /** Proxy S3/EC2 URLs through Next.js to avoid browser CORS blocks */
-const toProxied = (url: string | null): string | null =>
-  url ? `/api/proxy-model?url=${encodeURIComponent(url)}` : null;
+const toProxied = (url: string | null | undefined): string | null => {
+  if (!url || typeof url !== 'string') return null;
+  // Rule: If it starts with "/", it's a local file. NO PROXY NEEDED.
+  if (url.startsWith('/')) {
+    return url;
+  }
+  
+  // V20: Apple AR Quick Look URL Fix + CORS Bypass (Base64 path encoding with chunking)
+  // We must proxy ALL S3 URLs through Next.js because the glb-output bucket lacks frontend CORS headers.
+  const isUsdz = url.toLowerCase().includes('.usdz');
+  const ext = isUsdz ? '.usdz' : '.glb';
+  const encodedUrl = btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const chunks = encodedUrl.match(/.{1,200}/g)?.join('/') || encodedUrl;
+  return `/api/proxy-model/${chunks}/file${ext}`;
+};
 
 interface GenerateModalProps {
   onClose: () => void;
@@ -33,22 +48,25 @@ interface UploadedImage {
 }
 
 const generationStages = [
-  "Initializing processing pipeline…",
-  "Sampling geometry data…",
-  "Optimizing mesh structure…",
-  "Baking textures and final details…",
+  "Initializing processing pipeline...",
+  "Building the geometry...",
+  "Optimizing mesh structure...",
+  "Baking textures and final details...",
 ];
 
 export default function GenerateModal({ onClose }: GenerateModalProps) {
   const [uploadedImages, setUploadedImages] = useState<(UploadedImage | null)[]>(
     Array(8).fill(null)
   );
+  const [limitModalType, setLimitModalType] = useState<"GUEST" | "PAID" | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  const [limits, setLimits] = useState<any>(null);
   const [showEditProportions, setShowEditProportions] = useState(false);
   const [generatedGlbUrl, setGeneratedGlbUrl] = useState<string | null>(null);
   const [generatedUsdzUrl, setGeneratedUsdzUrl] = useState<string | null>(null);
   const [generatedS3Key, setGeneratedS3Key] = useState("");
+  const [generatedShortId, setGeneratedShortId] = useState("");
   const [isConvertingUSDZ, setIsConvertingUSDZ] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [dimensions, setDimensions] = useState({ length: "0ft", width: "0ft", height: "0ft" });
@@ -63,7 +81,29 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
   const [generationStage, setGenerationStage] = useState(0);
   const [userTier, setUserTier] = useState("NON_LOGGED");
   const generateAbortRef = useRef<AbortController | null>(null);
+  
+  // AR Compilation state
+  const [arTargetImage, setArTargetImage] = useState<File | null>(null);
+  const [isCompilingAR, setIsCompilingAR] = useState(false);
+  const [arViewerUrl, setArViewerUrl] = useState<string | null>(null);
+
   const { data: session } = useSession();
+
+  useEffect(() => {
+    if (!generatedGlbUrl && !generatedUsdzUrl) return;
+    fetch("/api/ar-link", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ 
+        id: generatedShortId,
+        glbUrl: toProxied(generatedGlbUrl), 
+        usdzUrl: toProxied(generatedUsdzUrl) 
+      })
+    })
+      .then(res => res.json())
+      .then(data => { if (data.id) setGeneratedShortId(data.id); })
+      .catch(err => console.error("Failed to generate short AR link", err));
+  }, [generatedGlbUrl, generatedUsdzUrl, generatedShortId]);
 
   const saveToLogbook = async (overrides = {}) => {
     if (!session) return;
@@ -96,18 +136,20 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
     return () => window.clearInterval(id);
   }, [isGenerating]);
 
-  useEffect(() => {
-    const fetchTier = async () => {
-      try {
-        const res = await axios.get("/api/user/limits");
-        if (res.data.success) {
-          setUserTier(res.data.tier);
-        }
-      } catch (err) {
-        console.error("Failed to fetch tier in GenerateModal:", err);
+  const fetchLimits = async () => {
+    try {
+      const res = await axios.get("/api/user/limits", { headers: { "x-guest-mac": getGuestMac() } });
+      if (res.data.success) {
+        setUserTier(res.data.tier);
+        setLimits(res.data.usage);
       }
-    };
-    fetchTier();
+    } catch (err) {
+      console.error("Failed to fetch limits in GenerateModal:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchLimits();
   }, [session]);
 
   // Dimension conversion helper
@@ -159,6 +201,13 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
   const handleModelDimensionsDetected = (detected: { length: number; height: number; width: number }) => {
     // Only update if dimensions are currently empty or "0"
     if (dimensionInputs.length === "" || dimensionInputs.length === "0") {
+      const maxDim = Math.max(detected.length, detected.width, detected.height);
+      const normalizer = maxDim > 10.0 ? (2.0 / (detected.length || 1.0)) : 1.0;
+
+      const normL = detected.length * normalizer;
+      const normW = detected.width * normalizer;
+      const normH = detected.height * normalizer;
+
       const fmt = (m: number) => {
         const toMm: Record<string, number> = {
           millimeters: 1,
@@ -172,9 +221,9 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
         return (Math.round(valInUnit * 100) / 100).toString();
       };
 
-      const l = fmt(detected.length);
-      const w = fmt(detected.width);
-      const h = fmt(detected.height);
+      const l = fmt(normL);
+      const w = fmt(normW);
+      const h = fmt(normH);
 
       const unitMap: Record<string, string> = {
         millimeters: "mm",
@@ -210,25 +259,55 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
     if (c > 0.1) setScaleValue((c - 0.1).toFixed(1));
   };
 
-  const handleImageUpload = (index: number, event: React.ChangeEvent<HTMLInputElement>) => {
+  const convertAvifToJpeg = async (file: File): Promise<File> => {
+    const isAvif = file.name.toLowerCase().endsWith('.avif') || file.type.toLowerCase() === 'image/avif';
+    if (!isAvif) return file;
+
+    try {
+      const bitmap = await createImageBitmap(file);
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return file;
+      ctx.drawImage(bitmap, 0, 0);
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.95));
+      if (blob) {
+        const newName = file.name.replace(/\.avif$/i, '.jpg');
+        return new File([blob], newName, { type: 'image/jpeg' });
+      }
+    } catch (err) {
+      console.warn('Failed to convert AVIF to JPEG in browser, sending original file:', err);
+    }
+    return file;
+  };
+
+  const handleImageUpload = async (index: number, event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
-    const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+    const imageFiles = files.filter((f) => {
+      const type = f.type.toLowerCase();
+      const ext = f.name.toLowerCase();
+      return type.startsWith("image/") || ext.endsWith(".avif");
+    });
 
     if (imageFiles.length === 0) {
-      toast.error("Invalid file type. Please upload image files (JPG, PNG, WEBP).", {
+      toast.error("Invalid file type. Please upload image files (JPG, PNG, WEBP, AVIF).", {
         duration: 3000,
       });
       return;
     }
 
-    const MAX_SIZE = 5 * 1024 * 1024;
+    // Convert any AVIF files to high-quality JPEGs in browser to ensure 100% EC2 backend compatibility
+    const convertedFiles = await Promise.all(imageFiles.map((f) => convertAvifToJpeg(f)));
+
+    const MAX_SIZE = 30 * 1024 * 1024;
     const valid: File[] = [];
     let hasOversizedFiles = false;
 
-    imageFiles.forEach((file) => {
+    convertedFiles.forEach((file) => {
       if (file.size > MAX_SIZE) {
         hasOversizedFiles = true;
-        toast.error(`${file.name} is too large (max 5MB). Please use a smaller image.`, {
+        toast.error(`${file.name} is too large (max 30MB). Please use a smaller image.`, {
           duration: 4000,
         });
       } else {
@@ -262,8 +341,7 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
 
     if (valid.length > addedCount) {
       toast.error(
-        `Maximum 8 images allowed. ${valid.length - addedCount} image${
-          valid.length - addedCount > 1 ? "s" : ""
+        `Maximum 8 images allowed. ${valid.length - addedCount} image${valid.length - addedCount > 1 ? "s" : ""
         } not added.`,
         {
           duration: 3000,
@@ -279,6 +357,11 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
   };
 
   const handleGenerate = async () => {
+    if (limits && limits.generate3d >= limits.maxGenerate3d) {
+      setLimitModalType(userTier === "NON_LOGGED" ? "GUEST" : "PAID");
+      return;
+    }
+
     const imagesToUpload = uploadedImages.filter(Boolean) as UploadedImage[];
 
     if (imagesToUpload.length === 0) {
@@ -299,56 +382,45 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
       }
 
       const response = await axios.post("/api/generate-3d", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
+        headers: { "x-guest-mac": getGuestMac() },
         timeout: 120_000,
         signal: abortController.signal,
       });
 
-      const { success, file_url, s3_key, dimensions: backendDimensions } = response.data;
+      const { success, file_url, glb_url, s3_key, file_key, url, dimensions: backendDimensions } = response.data;
+      const resultGlbUrl = glb_url || file_url || url;
+      const resultS3Key = file_key || s3_key;
 
-      if (!success || !file_url) throw new Error("No file_url in response");
+      if (!success || !resultGlbUrl) throw new Error("No file_url in response");
 
-      let finalGlbUrl = file_url;
-      let finalS3Key = s3_key || "";
+      let finalGlbUrl = resultGlbUrl;
+      let finalS3Key = resultS3Key || "";
 
-      if (userTier !== "PAID" && userTier !== "SUPER_ADMIN") {
-        toast.loading("Applying Watermark...", { id: "gen-toast" });
-        try {
-          const fd = new FormData();
-          fd.append('s3_key', finalS3Key);
-          fd.append('glb_url', finalGlbUrl);
-          fd.append('width', '0');
-          fd.append('height', '0');
-          fd.append('depth', '0');
-          fd.append('unit', 'm');
-          fd.append('auto_watermark', 'true');
-          fd.append('force_watermark', 'true');
-          fd.append('tier', userTier);
-
-          const apiRes = await axios.post("/api/resize", fd);
-          if (apiRes.data.success) {
-            finalGlbUrl = apiRes.data.glb_url;
-            finalS3Key = apiRes.data.file_key;
-          }
-        } catch (e) {
-          console.warn("Auto-watermark failed, continuing with original.");
-        }
-      }
 
       setGeneratedGlbUrl(finalGlbUrl);
       setGeneratedS3Key(finalS3Key);
       setGeneratedUsdzUrl(null); // Always reset USDZ state on new GLB
 
-      const lStr = backendDimensions?.width
-        ? (Math.round((backendDimensions.width / 0.3048) * 100) / 100).toString()
-        : "0";
-      const wStr = backendDimensions?.depth
-        ? (Math.round((backendDimensions.depth / 0.3048) * 100) / 100).toString()
-        : "0";
-      const hStr = backendDimensions?.height
-        ? (Math.round((backendDimensions.height / 0.3048) * 100) / 100).toString()
-        : "0";
+      let rawL = backendDimensions?.width || 0;
+      let rawW = backendDimensions?.depth || 0;
+      let rawH = backendDimensions?.height || 0;
 
+      if (rawL > 10.0 || rawW > 10.0 || rawH > 10.0) {
+        const scale = 2.0 / (rawL || 1.0);
+        rawL = 2.0;
+        rawW = Math.max(0.8, rawW * scale);
+        rawH = Math.max(0.5, rawH * scale);
+      }
+
+      const lStr = rawL > 0
+        ? (Math.round((rawL / 0.3048) * 100) / 100).toString()
+        : "0";
+      const wStr = rawW > 0
+        ? (Math.round((rawW / 0.3048) * 100) / 100).toString()
+        : "0";
+      const hStr = rawH > 0
+        ? (Math.round((rawH / 0.3048) * 100) / 100).toString()
+        : "0";
       const newDims = { length: `${lStr}ft`, width: `${wStr}ft`, height: `${hStr}ft` };
       setDimensions(newDims);
       setDimensionInputs({ length: lStr, width: wStr, height: hStr });
@@ -361,7 +433,33 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
         setOriginalS3Key(finalS3Key);
       }
 
+      // NEW: AUTOMATIC USDZ CONVERSION
+      try {
+        toast.loading("Converting for AR (Apple iOS)...", { id: "gen-toast" });
+        const fdUsdz = new FormData();
+        fdUsdz.append("s3_key", finalS3Key);
+        fdUsdz.append("tier", userTier);
+        fdUsdz.append("is_download", "false"); 
+        fdUsdz.append("watermark", "true");
+        fdUsdz.append("watermark_text", "TryitFirstLabs");
+        fdUsdz.append("glb_url", finalGlbUrl);
+        
+        const usdzRes = await axios.post("/api/convert-usdz", fdUsdz, {
+          validateStatus: (status) => status < 500,
+          headers: { "x-guest-mac": getGuestMac() }
+        });
+
+        if (usdzRes.status === 200 && usdzRes.data?.success) {
+           const usdzUrl = usdzRes.data.usdz_url || usdzRes.data.file_url || usdzRes.data.url;
+           setGeneratedUsdzUrl(usdzUrl);
+        }
+      } catch (usdzError) {
+        console.error("Automatic USDZ conversion failed:", usdzError);
+        // We do not throw, we still show the GLB model!
+      }
+
       toast.success("3D model generated successfully!", {
+        id: "gen-toast",
         duration: 3000,
       });
 
@@ -373,6 +471,8 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
         dimensionUnit: "feet"
       });
 
+      await fetchLimits();
+
       setIsGenerating(false);
       setShowPreview(true);
     } catch (error: any) {
@@ -380,22 +480,12 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
         setIsGenerating(false);
         return;
       }
-
-      console.error("Generation error:", error);
-
       let msg = "Failed to generate 3D model. Please try again.";
 
       if (error.code === "ECONNABORTED" || error.message?.includes("timeout")) {
-        msg =
-          "Generation timed out. This can happen with many or large images. Try using fewer images or reduce their size.";
+        msg = "Generation timed out. Please try fewer images or smaller files.";
       } else if (error.response?.status === 413) {
         msg = "Images are too large. Please reduce the file sizes and try again.";
-      } else if (error.response?.status === 400) {
-        msg =
-          error.response?.data?.error ||
-          "Invalid images. Please ensure all files are valid image formats (JPG, PNG, WEBP).";
-      } else if (error.response?.status === 503 || error.response?.status === 502) {
-        msg = "Service temporarily unavailable. Please try again in a moment.";
       } else if (error.message?.includes("Network Error")) {
         msg = "Network connection lost. Please check your internet and try again.";
       } else if (error.response?.data?.error) {
@@ -606,7 +696,7 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
         formData.append('height', dimensionInputs.height);
         formData.append('unit', unitMap[dimensionUnit] || "m");
       }
-      
+
       formData.append('tier', userTier);
 
       toast.loading("Resizing 3D model… this may take a moment", {
@@ -619,12 +709,14 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
         timeout: 60_000,
       });
 
-      const { success, file_url, s3_key } = response.data;
+      const { success, file_url, glb_url, s3_key, file_key, url } = response.data;
+      const resultGlbUrl = glb_url || file_url || url;
+      const resultS3Key = file_key || s3_key;
 
-      if (!success || !file_url) throw new Error("No file_url in response");
+      if (!success || !resultGlbUrl) throw new Error("No file_url in response");
 
-      setGeneratedGlbUrl(file_url);
-      setGeneratedS3Key(s3_key || generatedS3Key);
+      setGeneratedGlbUrl(resultGlbUrl);
+      setGeneratedS3Key(resultS3Key || generatedS3Key);
 
       const unitMap: Record<string, string> = {
         millimeters: "mm",
@@ -646,7 +738,7 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
         const calcL = (parseFloat(dimensionInputs.length) || 0) * scale;
         const calcW = (parseFloat(dimensionInputs.width) || 0) * scale;
         const calcH = (parseFloat(dimensionInputs.height) || 0) * scale;
-        
+
         finalL = calcL.toString();
         finalW = calcW.toString();
         finalH = calcH.toString();
@@ -745,6 +837,47 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
     }
   };
 
+  const handleOptimizeAndDownload = async () => {
+    if (!generatedS3Key) return;
+    
+    // Bypass Python resizing entirely. Use the direct gltf-transform optimization endpoint
+    setIsResizing(true);
+    try {
+      toast.loading("Optimizing & compressing model...", { id: "optimize-download", duration: Infinity });
+      
+      const formData = new FormData();
+      formData.append("s3_key", generatedS3Key);
+
+      const response = await axios.post("/api/optimize-direct", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 60_000,
+      });
+
+      const { success, glb_url } = response.data;
+      
+      if (!success || !glb_url) throw new Error("Optimization failed");
+      
+      toast.success("Optimized successfully! Downloading...", { id: "optimize-download", duration: 2000 });
+      setIsResizing(false);
+      
+      // Now download the optimized file
+      await handleDownload(toProxied(glb_url)!, "model_optimized.glb");
+      
+    } catch (error: any) {
+      console.error("Optimize error:", error);
+      
+      let msg = "Failed to optimize model. Please ensure the backend is running.";
+      if (error.response?.data?.error) {
+        msg = `Optimization failed: ${error.response.data.error}`;
+      } else if (error.message) {
+        msg = error.message;
+      }
+      
+      toast.error(msg, { id: "optimize-download", duration: 5000 });
+      setIsResizing(false);
+    }
+  };
+
   const handleDownload = async (url: string, fileName: string) => {
     try {
       toast.loading(`Downloading ${fileName}...`, { id: `download-${fileName}` });
@@ -775,6 +908,33 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
     }
   };
 
+  const handleCompileAR = async () => {
+    if (!arTargetImage || (!generatedGlbUrl && !generatedS3Key)) {
+      toast.error("Please provide a target image and ensure you have a generated 3D model.");
+      return;
+    }
+    
+    setIsCompilingAR(true);
+    try {
+      const formData = new FormData();
+      formData.append('image', arTargetImage);
+      
+      const response = await axios.post('/api/compile-mind', formData);
+      if (response.data.success) {
+         const mindUrl = response.data.mindUrl;
+         const viewerUrl = `${window.location.origin}/ar?mind=${encodeURIComponent(mindUrl)}&glb=${encodeURIComponent(generatedGlbUrl || '')}`;
+         setArViewerUrl(viewerUrl);
+         toast.success("AR Experience generated successfully!");
+      } else {
+         toast.error(response.data.error || "Failed to compile AR target.");
+      }
+    } catch (e: any) {
+      toast.error(e.response?.data?.error || "Error compiling AR target");
+    } finally {
+      setIsCompilingAR(false);
+    }
+  };
+
   const handleBackNavigation = () => {
     if (isGenerating) {
       generateAbortRef.current?.abort();
@@ -796,15 +956,16 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
   };
 
   const mainModalTitle = isGenerating
-    ? "3D Model Generator - Generating Section"
+    ? "Building your 3D model"
     : showPreview
-    ? "3D Model Generator - Preview Section"
-    : "3D Model Generator - Image Upload Section";
+      ? "Preview & Edit Model"
+      : "Generate 3D Model";
 
   return (
     <>
+      {/* Main Studio Modal */}
       <Transition appear show={true} as={Fragment}>
-        <Dialog as="div" className="relative z-50" onClose={() => {}}>
+        <Dialog as="div" className="relative z-50" onClose={() => { }}>
           <Transition.Child
             as={Fragment}
             enter="ease-out duration-300"
@@ -814,10 +975,10 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
             leaveFrom="opacity-100"
             leaveTo="opacity-0"
           >
-            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" />
           </Transition.Child>
           <div className="fixed inset-0 overflow-y-auto">
-            <div className="flex min-h-full items-center justify-center p-2 sm:p-4">
+            <div className="flex min-h-[100dvh] items-center justify-center p-2 sm:p-4 md:p-6">
               <Transition.Child
                 as={Fragment}
                 enter="ease-out duration-300"
@@ -827,324 +988,484 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
                 leaveFrom="opacity-100 scale-100"
                 leaveTo="opacity-0 scale-95"
               >
-                <Dialog.Panel className="relative flex flex-col w-[calc(100vw-0.75rem)] sm:w-full max-w-5xl transform rounded-xl bg-white shadow-xl transition-all max-h-[96dvh] sm:max-h-[92vh]">
+                <Dialog.Panel className={`relative flex flex-col w-full ${isGenerating ? 'max-w-lg' : showPreview ? 'max-w-5xl' : 'max-w-4xl'} transform rounded-2xl bg-white shadow-2xl transition-all h-[96dvh] sm:h-auto sm:max-h-[92vh]`}>
                   {/* Header */}
-                  <div className="flex items-center justify-between p-2.5 sm:p-3 border-b border-gray-200 bg-white z-10 rounded-t-xl flex-shrink-0">
-                    <button
-                      type="button"
-                      onClick={handleBackNavigation}
-                      className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all"
-                    >
-                      <ChevronLeftIcon className="w-6 h-6" />
-                    </button>
+                  <div className={`flex items-center justify-between p-3 sm:p-4 border-b border-gray-200 bg-white z-10 rounded-t-2xl flex-shrink-0 ${isGenerating ? 'justify-center' : ''}`}>
+                    {!isGenerating && (
+                      <button
+                        type="button"
+                        onClick={handleBackNavigation}
+                        className="p-2 sm:p-1.5 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all active:scale-95"
+                      >
+                        <ChevronLeftIcon className="w-5 h-5 sm:w-6 sm:h-6" />
+                      </button>
+                    )}
                     <Dialog.Title
                       as="h3"
-                      className="text-sm sm:text-lg md:text-xl font-semibold text-gray-900 absolute left-1/2 -translate-x-1/2 max-w-[65%] sm:max-w-none truncate sm:truncate-none text-center"
+                      className={`text-base sm:text-lg md:text-xl font-semibold text-gray-900 absolute left-1/2 -translate-x-1/2 max-w-[60%] sm:max-w-none truncate sm:truncate-none text-center ${isGenerating ? 'text-gray-800' : ''}`}
                     >
                       {mainModalTitle}
                     </Dialog.Title>
                     <button
                       type="button"
                       onClick={onClose}
-                      className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all"
+                      className="p-2 sm:p-1.5 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all active:scale-95 ml-auto"
                     >
-                      <XMarkIcon className="w-6 h-6" />
+                      <XMarkIcon className="w-5 h-5 sm:w-6 sm:h-6" />
                     </button>
                   </div>
 
                   {/* Content Wrapper with Scroll */}
-                  <div className="flex-1 min-h-0 overflow-y-auto">
-                    {/* Upload State */}
+                  <div className="flex-1 min-h-0 overflow-y-auto w-full no-scrollbar">
+
+                    {/* 1. Upload State */}
                     {!isGenerating && !showPreview && (
-                      <div className="flex flex-col lg:flex-row gap-3 p-3">
-                      {/* Instructions */}
-                      <div className="flex flex-col gap-2 lg:w-1/3">
-                        <div className="flex flex-col justify-center gap-2 p-3 bg-gray-50 rounded-lg h-full lg:min-h-[330px]">
-                          <p className="text-sm text-gray-700 font-medium">
-                            For best results, include multiple angles
-                          </p>
-                          <p className="text-xs text-gray-500">
-                            (front, back, sides, top, bottom)
-                          </p>
-                          <div className="flex flex-col items-center gap-1 mt-1 py-1">
-                            <div className="text-xs text-gray-600 font-medium">Top</div>
-                            <div className="relative w-24 h-24">
-                              <svg viewBox="0 0 100 100" className="w-full h-full">
-                                <polygon
-                                  points="50,20 80,35 80,65 50,80 20,65 20,35"
-                                  fill="#E0E7FF"
-                                  stroke="#6366F1"
-                                  strokeWidth="2"
-                                />
-                                <polygon
-                                  points="50,20 80,35 50,50 20,35"
-                                  fill="#C7D2FE"
-                                  stroke="#6366F1"
-                                  strokeWidth="2"
-                                />
-                                <polygon
-                                  points="50,50 80,35 80,65 50,80"
-                                  fill="#A5B4FC"
-                                  stroke="#6366F1"
-                                  strokeWidth="2"
-                                />
-                                <polygon
-                                  points="50,50 20,35 20,65 50,80"
-                                  fill="#93C5FD"
-                                  stroke="#6366F1"
-                                  strokeWidth="2"
-                                />
-                              </svg>
-                              <div className="absolute -left-8 top-1/2 -translate-y-1/2 text-xs text-gray-600">
-                                Left
-                              </div>
-                              <div className="absolute -right-8 top-1/2 -translate-y-1/2 text-xs text-gray-600">
-                                Right
-                              </div>
+                      <div className="flex flex-col lg:flex-row gap-4 sm:gap-6 lg:gap-8 p-4 sm:p-6 lg:p-8">
+                        {/* Instructions */}
+                        <div className="flex flex-col gap-3 lg:w-1/3">
+                          <div className="flex flex-col justify-center gap-3 p-4 sm:p-6 bg-gradient-to-br from-indigo-50/80 to-purple-50/80 rounded-2xl h-full lg:min-h-[350px] border border-indigo-100/50 shadow-sm relative overflow-hidden">
+                            <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-200/20 rounded-full blur-2xl pointer-events-none"></div>
+                            <div className="text-center relative z-10">
+                              <p className="text-sm sm:text-base text-gray-800 font-medium">
+                                For best results, include multiple angles
+                              </p>
+                              <p className="text-[11px] sm:text-xs text-gray-500 mt-1.5 font-medium">
+                                (front, back, sides, top, bottom)
+                              </p>
                             </div>
-                            <div className="text-xs text-gray-600 font-medium">Bottom</div>
+                            <div className="flex flex-col items-center gap-2 mt-4 py-2 relative z-10">
+                              <div className="text-[10px] text-indigo-500 font-semibold uppercase tracking-widest">Top</div>
+                              <div className="relative w-24 h-24 sm:w-28 sm:h-28 my-3">
+                                <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-sm opacity-90">
+                                  <polygon points="50,20 80,35 80,65 50,80 20,65 20,35" fill="#EEF2FF" stroke="#818CF8" strokeWidth="1.5" strokeLinejoin="round" />
+                                  <polygon points="50,20 80,35 50,50 20,35" fill="#E0E7FF" stroke="#818CF8" strokeWidth="1.5" strokeLinejoin="round" />
+                                  <polygon points="50,50 80,35 80,65 50,80" fill="#C7D2FE" stroke="#818CF8" strokeWidth="1.5" strokeLinejoin="round" />
+                                  <polygon points="50,50 20,35 20,65 50,80" fill="#A5B4FC" stroke="#818CF8" strokeWidth="1.5" strokeLinejoin="round" />
+                                </svg>
+                                <div className="absolute -left-8 top-1/2 -translate-y-1/2 text-[10px] text-indigo-500 font-semibold uppercase tracking-widest">
+                                  Left
+                                </div>
+                                <div className="absolute -right-10 top-1/2 -translate-y-1/2 text-[10px] text-indigo-500 font-semibold uppercase tracking-widest">
+                                  Right
+                                </div>
+                              </div>
+                              <div className="text-[10px] text-indigo-500 font-semibold uppercase tracking-widest">Bottom</div>
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      {/* Upload Grid */}
-                      <div className="flex flex-col gap-2 lg:w-2/3">
-                        <div className="flex flex-col gap-2">
-                          <h4 className="text-sm font-semibold text-gray-700">
-                            Upload Images ({uploadedImages.filter(Boolean).length}/8)
-                          </h4>
-                          <p className="text-xs text-gray-500 border-l-4 border-gray-300 pl-2 py-1 bg-gray-50">
-                            JPG, JPEG, PNG, WEBP accepted · max 5MB each
-                          </p>
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                            {[...Array(8)].map((_, index) => {
-                              const hasImage = Boolean(uploadedImages[index]);
-                              const isEnabled = hasImage || index === 0 || Boolean(uploadedImages[index - 1]);
-                              return (
-                                <div key={index} className="flex flex-col gap-1">
-                                  <div
-                                    className={`relative aspect-square rounded-lg border-2 border-dashed transition-all overflow-hidden ${
-                                      isEnabled
-                                        ? "border-gray-300 hover:border-blue-500 bg-gray-50"
-                                        : "border-gray-200 bg-gray-100 opacity-60"
-                                    }`}
-                                  >
-                                    {uploadedImages[index] ? (
-                                      <>
-                                        <img
-                                          src={uploadedImages[index]!.url}
-                                          alt={`Upload ${index + 1}`}
-                                          className="w-full h-full object-cover"
-                                        />
-                                        <button
-                                          type="button"
-                                          onClick={() => removeImage(index)}
-                                          className="absolute top-1 right-1 p-1 bg-red-500 text-white rounded-full hover:bg-red-600 transition-all z-10"
-                                        >
-                                          <XMarkIcon className="w-4 h-4" />
-                                        </button>
-                                      </>
-                                    ) : (
-                                      <label
-                                        className={`flex flex-col items-center justify-center w-full h-full ${
-                                          isEnabled
-                                            ? "cursor-pointer hover:bg-gray-100"
-                                            : "cursor-not-allowed"
-                                        } transition-all`}
-                                      >
-                                        <PhotoIcon className="w-8 h-8 text-gray-400 mb-1" />
-                                        <span className="text-xs text-gray-500 text-center px-2">
-                                          Click to upload
-                                        </span>
-                                        {isEnabled && (
-                                          <input
-                                            type="file"
-                                            accept="image/*"
-                                            multiple
-                                            onChange={(e) => handleImageUpload(index, e)}
-                                            className="hidden"
+                        {/* Upload Grid */}
+                        <div className="flex flex-col gap-3 lg:w-2/3">
+                          <div className="flex flex-col gap-3">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                              <h4 className="text-sm sm:text-base font-semibold text-gray-800">
+                                Upload Images <span className="text-indigo-500 text-sm font-medium">({uploadedImages.filter(Boolean).length}/8)</span>
+                              </h4>
+                              <p className="text-[10px] font-medium text-gray-500 bg-gray-100/80 backdrop-blur-sm px-3 py-1 rounded-full self-start sm:self-auto border border-gray-200/50">
+                                JPG, PNG, WEBP, AVIF · Max 30MB
+                              </p>
+                            </div>
+
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+                              {[...Array(8)].map((_, index) => {
+                                const hasImage = Boolean(uploadedImages[index]);
+                                const isEnabled = hasImage || index === 0 || Boolean(uploadedImages[index - 1]);
+                                return (
+                                  <div key={index} className="flex flex-col gap-1.5">
+                                    <div
+                                      className={`relative aspect-square rounded-xl border transition-all duration-300 overflow-hidden group ${isEnabled
+                                        ? "border-gray-200 border-dashed hover:border-indigo-400 bg-gray-50/50 hover:bg-indigo-50/30 hover:shadow-md"
+                                        : "border-gray-100 bg-gray-50/50 opacity-40"
+                                        }`}
+                                    >
+                                      {uploadedImages[index] ? (
+                                        <>
+                                          <img
+                                            src={uploadedImages[index]!.url}
+                                            alt={`Upload ${index + 1}`}
+                                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                                           />
-                                        )}
-                                      </label>
+                                          <button
+                                            type="button"
+                                            onClick={() => removeImage(index)}
+                                            className="absolute top-1.5 right-1.5 p-1.5 bg-red-500/90 backdrop-blur-sm text-white rounded-full hover:bg-red-600 hover:scale-110 active:scale-95 transition-all z-10 shadow-sm"
+                                          >
+                                            <XMarkIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                                          </button>
+                                        </>
+                                      ) : (
+                                        <label
+                                          className={`flex flex-col items-center justify-center w-full h-full ${isEnabled
+                                            ? "cursor-pointer"
+                                            : "cursor-not-allowed"
+                                            } transition-all`}
+                                        >
+                                          <PhotoIcon className={`w-7 h-7 sm:w-9 sm:h-9 mb-2 transition-colors duration-300 ${isEnabled ? "text-gray-300 group-hover:text-indigo-400" : "text-gray-200"}`} />
+                                          <span className={`text-[10px] text-center font-medium px-2 ${isEnabled ? "text-gray-400 group-hover:text-indigo-500" : "text-gray-300"}`}>
+                                            Tap to upload
+                                          </span>
+                                          {isEnabled && (
+                                            <input
+                                              type="file"
+                                              accept="image/*,.avif"
+                                              multiple
+                                              onChange={(e) => handleImageUpload(index, e)}
+                                              className="hidden"
+                                            />
+                                          )}
+                                        </label>
+                                      )}
+                                    </div>
+                                    {uploadedImages[index] && (
+                                      <p
+                                        className="text-[10px] sm:text-xs font-medium text-gray-500 truncate px-1 text-center"
+                                        title={uploadedImages[index]!.name}
+                                      >
+                                        {uploadedImages[index]!.name}
+                                      </p>
                                     )}
                                   </div>
-                                  {uploadedImages[index] && (
-                                    <p
-                                      className="text-xs text-gray-600 truncate px-1"
-                                      title={uploadedImages[index]!.name}
-                                    >
-                                      {uploadedImages[index]!.name}
-                                    </p>
-                                  )}
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          <div className="flex justify-end mt-5 sm:mt-3">
+                            <button
+                              type="button"
+                              onClick={handleGenerate}
+                              disabled={uploadedImages.filter(Boolean).length === 0}
+                              className="w-full sm:w-auto flex items-center justify-center gap-2 px-8 py-3.5 sm:py-3 rounded-2xl bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold text-sm sm:text-base shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 disabled:hover:shadow-indigo-500/25 transition-all duration-300"
+                            >
+                              <SparklesIcon className="w-5 h-5 opacity-90" />
+                              <span>Generate 3D Model</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 2. Generating State */}
+                    {isGenerating && (
+                      <div className="flex flex-col items-center justify-center py-12 sm:py-16 px-4 sm:px-6 h-full min-h-[50vh] relative overflow-hidden">
+                        
+                        {/* Futuristic Ambient Halo */}
+                        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 bg-indigo-500/10 blur-3xl rounded-full pointer-events-none"></div>
+                        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 bg-purple-500/10 blur-2xl rounded-full pointer-events-none animate-pulse"></div>
+
+                        <div className="relative w-[180px] h-[180px] sm:w-[220px] sm:h-[220px] md:w-[240px] md:h-[240px] -mb-2 z-10">
+                          <Lottie
+                            animationData={LoaderAnimation}
+                            loop
+                            autoplay
+                            className="w-full h-full drop-shadow-lg"
+                          />
+                        </div>
+
+                        <div className="flex flex-col items-center gap-2 sm:gap-3 max-w-md mx-auto w-full z-10">
+                          <h3 className="text-xl sm:text-2xl font-semibold text-gray-800 text-center tracking-tight">
+                            Building your 3D model
+                          </h3>
+                          <div className="h-6 flex items-center justify-center">
+                            <p className="text-sm sm:text-base font-medium transition-all duration-500 bg-clip-text text-transparent bg-gradient-to-r from-indigo-500 to-purple-600 animate-pulse">
+                              {generationStages[generationStage]}
+                            </p>
+                          </div>
+                          
+                          {/* Elegant Glowing Progress Bar */}
+                          <div className="w-full max-w-[260px] h-1.5 bg-gray-100/80 rounded-full mt-4 overflow-hidden relative shadow-inner">
+                             <div className="h-full bg-gray-100 relative w-full overflow-hidden rounded-full">
+                               <div className="absolute top-0 bottom-0 left-0 w-full bg-gradient-to-r from-indigo-50 to-purple-50"></div>
+                               <div className="absolute top-0 bottom-0 w-1/2 bg-gradient-to-r from-transparent via-indigo-400/40 to-transparent rounded-full animate-[shimmer_2s_infinite]"></div>
+                             </div>
+                          </div>
+
+                          <p className="text-[11px] sm:text-xs text-gray-400 text-center mt-3 font-medium">
+                            Usually 1—2 minutes. Please keep this window open.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 3. Preview State */}
+                    {showPreview && !isGenerating && !showEditProportions && (
+                      <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 p-4 sm:p-6 lg:p-8">
+
+                        {/* 3D Viewer Container */}
+                        <div className="flex-1 flex items-center justify-center w-full">
+                          {/* FIX IMPLEMENTED: Strict heights to prevent modal vertical overflow */}
+                          <div className="relative w-full h-[350px] sm:h-[450px] lg:h-[500px] shrink-0 bg-gradient-to-b from-gray-50 to-white rounded-2xl overflow-hidden shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] border border-gray-100">
+                            {generatedGlbUrl && (
+                              <ModelPreview3D
+                                glbUrl={toProxied(generatedGlbUrl)!}
+                                usdzUrl={generatedUsdzUrl}
+                                dimensions={dimensions}
+                                currentUnit={dimensionUnit}
+                                onModelDimensionsDetected={handleModelDimensionsDetected}
+                                userTier={userTier}
+                              />
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Controls Container */}
+                        <div className="flex-1 flex flex-col gap-4 justify-center items-center lg:items-start w-full max-w-md mx-auto lg:max-w-none">
+
+                          {/* Dimensions Card */}
+                          <div className="flex flex-col gap-3 p-4 sm:p-5 bg-gradient-to-br from-indigo-50/40 to-purple-50/40 rounded-2xl shadow-sm border border-indigo-100/50 w-full backdrop-blur-sm">
+                            <h4 className="text-xs sm:text-sm font-semibold text-gray-500 uppercase tracking-widest text-center lg:text-left">
+                              Current Dimensions
+                            </h4>
+                            <div className="grid grid-cols-3 gap-2 sm:gap-3">
+                              {["length", "width", "height"].map((d) => (
+                                <div key={d} className="flex flex-col items-center justify-center p-2.5 sm:p-3 bg-white/70 rounded-xl border border-gray-100/50 backdrop-blur-md shadow-[0_2px_4px_rgba(0,0,0,0.01)]">
+                                  <span className="text-[10px] sm:text-xs text-indigo-400 mb-1 uppercase tracking-wider font-semibold">{d}</span>
+                                  <span className="text-sm sm:text-base font-bold text-gray-800">
+                                    {dimensions[d as keyof typeof dimensions]}
+                                  </span>
                                 </div>
-                              );
-                            })}
+                              ))}
+                            </div>
                           </div>
-                        </div>
-                        <div className="flex justify-end mt-1">
-                          <button
-                            type="button"
-                            onClick={handleGenerate}
-                            disabled={uploadedImages.filter(Boolean).length === 0}
-                            className="flex items-center justify-center gap-2 px-6 py-2.5 rounded-lg bg-gradient-to-br from-blue-600 to-purple-600 text-white font-semibold text-base hover:shadow-lg hover:scale-[1.02] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100 transition-all duration-200"
-                          >
-                            <SparklesIcon className="w-5 h-5" />
-                            <span>Generate</span>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
 
-                  {/* Generating State */}
-                  {isGenerating && (
-                    <div className="flex flex-col items-center justify-center py-5 sm:py-6 px-4 sm:px-6">
-                      <div className="w-[240px] h-[240px] sm:w-[280px] sm:h-[280px] -mb-1 sm:-mb-2">
-                        <Lottie
-                          animationData={LoaderAnimation}
-                          loop
-                          autoplay
-                          className="w-full h-full"
-                        />
-                      </div>
-
-                      <div className="flex flex-col items-center gap-1 sm:gap-1.5">
-                        <h3 className="text-xl font-semibold text-gray-900 text-center">
-                          Generating 3D model
-                        </h3>
-                        <p className="text-sm text-blue-600 text-center font-medium transition-all duration-500">
-                          {generationStages[generationStage]}
-                        </p>
-                      </div>
-
-                      <p className="mt-3 sm:mt-4 text-sm text-gray-500 text-center">
-                        This usually takes 1–2 minutes. Please don&apos;t close this window.
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Preview State */}
-                  {showPreview && !isGenerating && (
-                    <div className="flex flex-col lg:flex-row gap-3 p-3">
-                      {/* 3D Viewer */}
-                      <div className="flex-1 flex items-center justify-center">
-                        <div className="relative w-full h-[240px] sm:h-[320px] lg:h-[380px] bg-black rounded-lg overflow-hidden shadow-md">
-                          {generatedGlbUrl && (
-                            <ModelPreview3D 
-                              glbUrl={toProxied(generatedGlbUrl)!} 
-                              dimensions={dimensions} 
-                              onModelDimensionsDetected={handleModelDimensionsDetected}
-                              userTier={userTier}
-                            />
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Controls */}
-                      <div className="flex-1 flex flex-col gap-2 justify-center items-center">
-                        {/* Dimensions */}
-                        <div className="flex flex-col gap-1.5 p-2.5 bg-white rounded-lg shadow-sm border border-gray-200 w-full max-w-sm">
-                          <h4 className="text-sm font-semibold text-gray-700">
-                            Current Dimensions:
-                          </h4>
-                          <div className="grid grid-cols-3 gap-2">
-                            {["length", "width", "height"].map((d) => (
-                              <div
-                                key={d}
-                                className="flex flex-col items-center p-2 bg-gray-50 rounded-lg"
-                              >
-                                <span className="text-xs text-gray-500 mb-1 capitalize">{d}</span>
-                                <span className="text-sm font-semibold text-gray-900">
-                                  {dimensions[d as keyof typeof dimensions]}
-                                </span>
+                          {/* Usage Counter */}
+                          {limits && (
+                            <div className="flex items-center justify-between w-full px-5 py-3.5 bg-white/80 border border-gray-100/80 rounded-xl shadow-sm backdrop-blur-sm">
+                              <span className="text-xs sm:text-sm font-medium text-gray-500 uppercase tracking-widest">
+                                Generate 3D
+                              </span>
+                              <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-1.5 font-semibold text-sm sm:text-base text-gray-800">
+                                  <span className={limits.generate3d >= limits.maxGenerate3d ? "text-red-500" : "text-indigo-500"}>
+                                    {limits.generate3d}
+                                  </span>
+                                  <span className="text-gray-300">/</span>
+                                  <span className="text-gray-500">{limits.maxGenerate3d}</span>
+                                </div>
+                                <div className={`w-1.5 h-1.5 rounded-full ${limits.generate3d >= limits.maxGenerate3d ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]' : 'bg-indigo-400 shadow-[0_0_8px_rgba(99,102,241,0.5)]'}`}></div>
                               </div>
-                            ))}
+                            </div>
+                          )}
+                          
+
+                          {/* Action Buttons */}
+                          <div className="flex flex-col gap-3 w-full mt-2">
+                            <button
+                              type="button"
+                              onClick={handleRegenerate}
+                              className="flex items-center justify-center gap-2 px-6 py-3.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold text-sm sm:text-base shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:scale-[1.02] active:scale-[0.98] transition-all duration-300"
+                            >
+                              <ArrowPathIcon className="w-5 h-5 opacity-90" />
+                              <span>Regenerate Model</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setShowEditProportions(true)}
+                              className="flex items-center justify-center gap-2 px-6 py-3.5 rounded-2xl border-2 border-gray-200 bg-white text-gray-700 font-semibold text-sm hover:bg-gray-50 hover:border-gray-300 transition-all"
+                            >
+                              <PencilIcon className="w-5 h-5" />
+                              <span>Edit proportions</span>
+                            </button>
+                            
+                            {(session?.user?.email === "janapativarsha6@gmail.com" || userTier === "SUPER_ADMIN" || userTier === "PAID") && (
+                              <div className="flex gap-3 w-full">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDownload(toProxied(generatedGlbUrl)!, "model.glb")}
+                                  disabled={!generatedGlbUrl || isResizing}
+                                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-3 rounded-2xl border-2 border-indigo-100 bg-indigo-50/50 text-indigo-600 font-semibold text-sm hover:bg-indigo-100 hover:border-indigo-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <ArrowDownTrayIcon className="w-4 h-4" />
+                                  <span>Download GLB</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleConvertToUSDZ}
+                                  disabled={isConvertingUSDZ || !generatedS3Key}
+                                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-3 rounded-2xl border-2 border-indigo-100 bg-indigo-50/50 text-indigo-600 font-semibold text-sm hover:bg-indigo-100 hover:border-indigo-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <ArrowDownTrayIcon className="w-4 h-4" />
+                                  <span>{isConvertingUSDZ ? "Converting..." : "Download USDZ"}</span>
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+
+
+
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 4. Edit Proportions State */}
+                    {showEditProportions && !isGenerating && (
+                      <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 p-4 sm:p-6 lg:p-8">
+                        {/* Left side: Controls */}
+                        <div className="flex-1 flex flex-col gap-6 justify-center w-full max-w-md mx-auto lg:max-w-none">
+                          <h3 className="text-xl sm:text-2xl font-bold text-gray-900">How do you want to resize?</h3>
+                          
+                          {/* Segmented Control */}
+                          <div className="flex bg-gray-100 p-1 rounded-xl">
+                            <button
+                              type="button"
+                              onClick={() => setResizeMode("manual")}
+                              className={`flex-1 py-2 px-4 rounded-lg text-sm font-bold transition-all ${
+                                resizeMode === "manual" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
+                              }`}
+                            >
+                              Enter exact numbers
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setResizeMode("scale")}
+                              className={`flex-1 py-2 px-4 rounded-lg text-sm font-bold transition-all ${
+                                resizeMode === "scale" ? "bg-white text-indigo-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+                              }`}
+                            >
+                              Scale it up/down %
+                            </button>
+                          </div>
+
+                          <div className="flex flex-col gap-4">
+                            {resizeMode === "manual" ? (
+                              <>
+                                <div className="flex flex-col gap-1.5">
+                                  <label className="text-sm font-bold text-gray-700">Units</label>
+                                  <select
+                                    value={dimensionUnit}
+                                    onChange={(e) => handleUnitChange(e.target.value)}
+                                    className="w-full sm:w-1/2 rounded-xl border border-gray-300 py-2.5 px-3 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm font-medium bg-white"
+                                  >
+                                    <option value="millimeters">Millimeters</option>
+                                    <option value="centimeters">Centimeters</option>
+                                    <option value="inches">Inches</option>
+                                    <option value="feet">Feet</option>
+                                    <option value="meters">Meters</option>
+                                  </select>
+                                </div>
+                                
+                                <div className="flex flex-col gap-1.5">
+                                  <label className="text-sm font-bold text-gray-700">Current &rarr; Result</label>
+                                  <div className="grid grid-cols-3 gap-3">
+                                    {["length", "width", "height"].map((d) => (
+                                      <div key={d} className="flex flex-col gap-1">
+                                        <span className="text-xs text-gray-500 capitalize font-semibold text-center">{d}</span>
+                                        <input
+                                          type="number"
+                                          value={dimensionInputs[d as keyof typeof dimensionInputs]}
+                                          onChange={(e) => setDimensionInputs({ ...dimensionInputs, [d]: e.target.value })}
+                                          className="w-full rounded-xl border border-gray-300 py-2 px-3 text-center text-sm font-medium shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                                          placeholder="0.00"
+                                        />
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="flex items-end gap-4">
+                                  <div className="flex flex-col gap-1.5 flex-1">
+                                    <label className="text-sm font-bold text-gray-700">Units</label>
+                                    <select
+                                      value={dimensionUnit}
+                                      onChange={(e) => handleUnitChange(e.target.value)}
+                                      className="w-full rounded-xl border border-gray-300 py-2.5 px-3 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm font-medium bg-white"
+                                    >
+                                      <option value="millimeters">Millimeters</option>
+                                      <option value="centimeters">Centimeters</option>
+                                      <option value="inches">Inches</option>
+                                      <option value="feet">Feet</option>
+                                      <option value="meters">Meters</option>
+                                    </select>
+                                  </div>
+                                  <div className="flex flex-col gap-1.5 flex-1">
+                                    <label className="text-sm font-bold text-gray-700">Scale Factor</label>
+                                    <div className="flex items-center gap-2">
+                                      <button type="button" onClick={decrementScale} className="p-2 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center justify-center text-gray-600 bg-white shadow-sm">
+                                        <MinusIcon className="w-4 h-4" />
+                                      </button>
+                                      <input
+                                        type="number"
+                                        value={scaleValue}
+                                        onChange={(e) => setScaleValue(e.target.value)}
+                                        placeholder="1.0"
+                                        className="w-full text-center rounded-xl border border-gray-300 py-2 px-3 text-sm font-medium focus:border-indigo-500 focus:ring-indigo-500 shadow-sm"
+                                      />
+                                      <button type="button" onClick={incrementScale} className="p-2 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center justify-center text-gray-600 bg-white shadow-sm">
+                                        <PlusIcon className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-col gap-1.5 mt-2">
+                                  <label className="text-sm font-bold text-gray-700">Current &rarr; Result</label>
+                                  <div className="grid grid-cols-3 gap-3">
+                                    {["length", "width", "height"].map((d) => {
+                                      const current = parseFloat(dimensionInputs[d as keyof typeof dimensionInputs]) || 0;
+                                      const factor = parseFloat(scaleValue) || 1;
+                                      const result = (current * factor).toFixed(2);
+                                      return (
+                                        <div key={d} className="flex flex-col gap-1">
+                                          <span className="text-xs text-gray-500 capitalize font-semibold text-center">{d}</span>
+                                          <div className="w-full rounded-xl border border-gray-200 bg-gray-50 py-2 px-3 text-center text-sm font-medium text-gray-700 shadow-sm">
+                                            {result}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          
+                          <div className="flex flex-col sm:flex-row items-center gap-3 mt-4">
+                            <button
+                              type="button"
+                              onClick={() => setShowEditProportions(false)}
+                              className="w-full sm:flex-1 py-3 px-4 rounded-xl border-2 border-gray-200 bg-white text-gray-700 font-bold text-sm hover:bg-gray-50 transition-all text-center"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleReset}
+                              className="w-full sm:flex-1 py-3 px-4 rounded-xl border-2 border-orange-400 bg-white text-orange-500 font-bold text-sm hover:bg-orange-50 transition-all flex items-center justify-center gap-1.5"
+                            >
+                              <ArrowPathIcon className="w-4 h-4" />
+                              Reset
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleResize}
+                              disabled={isResizing}
+                              className="w-full sm:flex-[1.5] py-3 px-4 rounded-xl bg-indigo-600 text-white font-bold text-sm hover:bg-indigo-700 disabled:opacity-50 transition-all text-center flex items-center justify-center"
+                            >
+                              {isResizing ? "Applying..." : "Apply new size"}
+                            </button>
                           </div>
                         </div>
 
-                        {/* Action buttons */}
-                        <div className="flex flex-col gap-2 w-full max-w-xs">
-                          <button
-                            type="button"
-                            onClick={handleRegenerate}
-                            className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-blue-500 text-white font-semibold text-sm hover:bg-blue-600 hover:shadow-lg transition-all"
-                          >
-                            <ArrowPathIcon className="w-4 h-4" />
-                            <span>Regenerate</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setResizeMode("manual");
-                              setShowEditProportions(true);
-                            }}
-                            className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-white border-2 border-gray-300 text-gray-700 font-semibold text-sm hover:border-blue-500 hover:shadow-lg transition-all"
-                          >
-                            <PencilIcon className="w-4 h-4" />
-                            <span>Edit proportions</span>
-                          </button>
-                        </div>
-
-                        <div className="flex items-center justify-center py-1 w-full max-w-xs">
-                          <div className="flex-grow border-t-2 border-dashed border-gray-300" />
-                          <span className="px-3 text-xs text-gray-400 font-medium">or</span>
-                          <div className="flex-grow border-t-2 border-dashed border-gray-300" />
-                        </div>
-
-                        {/* Download buttons */}
-                        <div className="flex flex-col gap-2 w-full max-w-xs">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (generatedGlbUrl === originalGlbUrl && userTier !== "PAID") {
-                                toast.error("Please click 'Edit proportions' and then 'Apply & Resize' to bake the watermark into your model before downloading.", {
-                                  duration: 5000,
-                                  id: "watermark-warn"
-                                });
-                                return;
-                              }
-                              generatedGlbUrl && handleDownload(toProxied(generatedGlbUrl)!, generatedS3Key ? generatedS3Key.split('/').pop() || "model.glb" : "model.glb");
-                            }}
-                            disabled={!generatedGlbUrl}
-                            className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-br from-purple-500 to-purple-700 text-white font-semibold text-sm hover:shadow-lg hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
-                          >
-                            <ArrowDownTrayIcon className="w-4 h-4" />
-                            <span>Download GLB</span>
-                          </button>
-
-                          {!generatedUsdzUrl ? (
-                            <button
-                              type="button"
-                              onClick={handleConvertToUSDZ}
-                              disabled={isConvertingUSDZ || !generatedGlbUrl}
-                              className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-br from-purple-500 to-purple-700 text-white font-semibold text-sm hover:shadow-lg hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
-                            >
-                              {isConvertingUSDZ ? (
-                                <>
-                                  <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                                  <span>Converting...</span>
-                                </>
-                              ) : (
-                                <>
-                                  <ArrowPathIcon className="w-4 h-4" />
-                                  <span>Convert to USDZ</span>
-                                </>
-                              )}
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleDownload(toProxied(generatedUsdzUrl)!, generatedS3Key ? generatedS3Key.replace('.glb', '.usdz').split('/').pop() || "model.usdz" : "model.usdz")}
-                              className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-br from-purple-500 to-purple-700 text-white font-semibold text-sm hover:shadow-lg hover:scale-[1.02] transition-all"
-                            >
-                              <ArrowDownTrayIcon className="w-4 h-4" />
-                              <span>Download USDZ</span>
-                            </button>
-                          )}
+                        {/* Right side: 3D Preview */}
+                        <div className="flex-1 flex items-center justify-center w-full">
+                          <div className="relative w-full h-[350px] sm:h-[450px] lg:h-[500px] shrink-0 bg-white rounded-2xl overflow-hidden shadow-sm border border-gray-200 p-2">
+                            {generatedGlbUrl && (
+                              <ModelPreview3D
+                                glbUrl={toProxied(generatedGlbUrl)!}
+                                usdzUrl={generatedUsdzUrl}
+                                dimensions={dimensions}
+                                currentUnit={dimensionUnit}
+                                onModelDimensionsDetected={handleModelDimensionsDetected}
+                                userTier={userTier}
+                              />
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )}
+                    )}
                   </div>
                 </Dialog.Panel>
               </Transition.Child>
@@ -1153,9 +1474,9 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
         </Dialog>
       </Transition>
 
-      {/* Edit Proportions Modal */}
-      <Transition appear show={showEditProportions} as={Fragment}>
-        <Dialog as="div" className="relative z-50" onClose={() => {}}>
+      {/* Limit Reached Popups */}
+      <Transition appear show={!!limitModalType} as={Fragment}>
+        <Dialog as="div" className="relative z-[70]" onClose={() => setLimitModalType(null)}>
           <Transition.Child
             as={Fragment}
             enter="ease-out duration-300"
@@ -1165,10 +1486,11 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
             leaveFrom="opacity-100"
             leaveTo="opacity-0"
           >
-            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
+            <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm" />
           </Transition.Child>
+
           <div className="fixed inset-0 overflow-y-auto">
-            <div className="flex min-h-full items-center justify-center p-2 sm:p-4">
+            <div className="flex min-h-full items-center justify-center p-4 text-center">
               <Transition.Child
                 as={Fragment}
                 enter="ease-out duration-300"
@@ -1178,224 +1500,46 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
                 leaveFrom="opacity-100 scale-100"
                 leaveTo="opacity-0 scale-95"
               >
-                <Dialog.Panel className="relative flex flex-col w-[calc(100vw-0.75rem)] sm:w-full max-w-2xl transform rounded-xl bg-white shadow-xl transition-all max-h-[96dvh] sm:max-h-[92vh]">
-                  <div className="flex items-center justify-between p-3 border-b border-gray-200 bg-white z-10 rounded-t-xl flex-shrink-0">
+                <Dialog.Panel className="w-full max-w-md transform overflow-hidden rounded-2xl bg-white p-6 sm:p-8 text-left align-middle shadow-2xl transition-all border border-gray-100">
+                  <Dialog.Title as="h3" className="text-xl sm:text-2xl font-black text-gray-900 mb-3 tracking-tight">
+                    {limitModalType === "GUEST" ? "Free Limit Reached! 🚀" : "Daily Limit Reached! 🌟"}
+                  </Dialog.Title>
+                  <div className="mt-2">
+                    <p className="text-sm sm:text-base text-gray-600 mb-8 leading-relaxed">
+                      {limitModalType === "GUEST"
+                        ? "You've generated 2 out of 2 free 3D models. Log in or create a free account to unlock more generations and save your creations forever!"
+                        : "You've used all of your daily 3D generations. Upgrade your plan to get unlimited high-fidelity models and priority processing."}
+                    </p>
+                  </div>
+
+                  <div className="mt-4 flex flex-col sm:flex-row gap-3 sm:justify-end">
                     <button
                       type="button"
-                      onClick={() => setShowEditProportions(false)}
-                      className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all"
+                      className="inline-flex justify-center w-full sm:w-auto rounded-xl border border-gray-200 bg-white px-5 py-3 text-sm font-bold text-gray-700 hover:bg-gray-50 focus:outline-none transition-all"
+                      onClick={() => setLimitModalType(null)}
                     >
-                      <ChevronLeftIcon className="w-6 h-6" />
+                      Maybe Later
                     </button>
-                    <Dialog.Title
-                      as="h3"
-                      className="text-sm sm:text-lg md:text-xl font-semibold text-gray-900 absolute left-1/2 -translate-x-1/2 max-w-[65%] sm:max-w-none truncate sm:truncate-none text-center"
-                    >
-                      3D Model Generator - Resize Section
-                    </Dialog.Title>
-                    <button
-                      type="button"
-                      onClick={() => setShowEditProportions(false)}
-                      className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-all"
-                    >
-                      <XMarkIcon className="w-6 h-6" />
-                    </button>
-                  </div>
-                  <div className="flex-1 min-h-0 overflow-y-auto">
-                    <div className="p-3">
-                    <div className="flex flex-col gap-2 w-full">
-                      <div className="p-2.5 bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg">
-                        <h3 className="text-sm font-semibold text-white">
-                          Set Model Dimensions
-                        </h3>
-                      </div>
-
-                      {/* Mode Toggle */}
-                      <div className="flex flex-col gap-1">
-                        <label className="text-xs font-semibold text-gray-700">Resize Mode</label>
-                        <div className="flex items-center gap-2 p-0.5 bg-gray-100 rounded-lg">
-                          <button
-                            type="button"
-                            onClick={() => setResizeMode("manual")}
-                            className={`flex-1 px-4 py-1.5 rounded-md font-medium text-xs transition-all ${
-                              resizeMode === "manual"
-                                ? "bg-gray-200 text-blue-600 shadow-sm"
-                                : "text-gray-600 hover:text-gray-900 hover:bg-gray-50"
-                            }`}
-                          >
-                            Manual
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setResizeMode("scale")}
-                            className={`flex-1 px-4 py-1.5 rounded-md font-medium text-xs transition-all ${
-                              resizeMode === "scale"
-                                ? "bg-gray-200 text-blue-600 shadow-sm"
-                                : "text-gray-600 hover:text-gray-900 hover:bg-gray-50"
-                            }`}
-                          >
-                            Scale
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Unit selector and Scale Factor */}
-                      <div className="flex gap-2">
-                        <div className="flex flex-col gap-1 flex-1">
-                          <label className="text-xs font-semibold text-gray-700">Units</label>
-                          <select
-                            value={dimensionUnit}
-                            onChange={(e) => handleUnitChange(e.target.value)}
-                            className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-gray-700 bg-white focus:ring-2 focus:ring-blue-600 focus:border-transparent transition-all text-xs"
-                          >
-                            <option value="meters">Meters</option>
-                            <option value="millimeters">Millimeters</option>
-                            <option value="centimeters">Centimeters</option>
-                            <option value="inches">Inches</option>
-                            <option value="feet">Feet</option>
-                          </select>
-                        </div>
-
-                        {resizeMode === "scale" && (
-                          <div className="flex flex-col gap-1 flex-1">
-                            <label className="text-xs font-semibold text-gray-700">
-                              Scale Factor
-                            </label>
-                            <div className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={decrementScale}
-                                className="p-1.5 rounded-lg bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 hover:border-blue-600 transition-all"
-                              >
-                                <MinusIcon className="w-3 h-3" />
-                              </button>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                placeholder="1.0"
-                                autoComplete="off"
-                                value={scaleValue}
-                                onChange={(e) => {
-                                  const v = e.target.value;
-                                  if (v === "" || /^\d*\.?\d{0,2}$/.test(v)) setScaleValue(v);
-                                }}
-                                className="flex-1 px-2 py-1.5 border border-gray-300 rounded-lg text-gray-700 bg-white focus:ring-2 focus:ring-blue-600 focus:border-transparent transition-all text-center text-xs font-semibold"
-                              />
-                              <button
-                                type="button"
-                                onClick={incrementScale}
-                                className="p-1.5 rounded-lg bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 hover:border-blue-600 transition-all"
-                              >
-                                <PlusIcon className="w-3 h-3" />
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Dimension inputs */}
-                      <div className="flex flex-col gap-1">
-                        <label className="text-xs font-semibold text-gray-700">
-                          {resizeMode === "scale" ? "Current → Result" : "Target Dimensions"}
-                        </label>
-                        <div className="grid grid-cols-3 gap-2">
-                          {["length", "width", "height"].map((dim) => {
-                            const unitMap: Record<string, string> = {
-                              millimeters: "mm",
-                              centimeters: "cm",
-                              inches: "in",
-                              feet: "ft",
-                              meters: "m",
-                            };
-                            const current = parseFloat(dimensionInputs[dim as keyof typeof dimensionInputs]) || 0;
-                            const scale = parseFloat(scaleValue) || 1;
-                            const result = current * scale;
-                            const showResult = resizeMode === "scale" && scaleValue && scale > 0;
-
-                            return (
-                              <div key={dim} className="flex flex-col gap-1">
-                                <label className="text-xs font-medium text-gray-600 text-center capitalize">
-                                  {dim}
-                                </label>
-                                <input
-                                  type="text"
-                                  inputMode="decimal"
-                                  placeholder="0"
-                                  autoComplete="off"
-                                  value={dimensionInputs[dim as keyof typeof dimensionInputs]}
-                                  onChange={(e) => {
-                                    const v = e.target.value;
-                                    if (v === "" || /^\d*\.?\d{0,2}$/.test(v))
-                                      setDimensionInputs((p) => ({ ...p, [dim]: v }));
-                                  }}
-                                  disabled={resizeMode === "scale"}
-                                  className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-gray-700 bg-white focus:ring-2 focus:ring-blue-600 focus:border-transparent transition-all text-center text-xs disabled:bg-gray-100 disabled:cursor-not-allowed"
-                                />
-                                {showResult && (
-                                  <div className="text-center text-xs">
-                                    <span className="text-gray-400">→ </span>
-                                    <span className="font-semibold text-blue-600">
-                                      {(Math.round(result * 100) / 100).toString()}
-                                      {unitMap[dimensionUnit] || "m"}
-                                    </span>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Buttons */}
-                      <div className="flex flex-col gap-2 mt-1">
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={handleContinueDimensions}
-                            disabled={isResizing}
-                            className="flex-1 px-4 py-2 rounded-lg bg-gradient-to-br from-blue-600 to-purple-600 text-white font-semibold text-xs hover:shadow-lg hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
-                          >
-                            {isResizing ? (
-                              <span className="flex items-center justify-center gap-2">
-                                <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                                Resizing...
-                              </span>
-                            ) : generatedS3Key ? (
-                              "Apply & Resize"
-                            ) : (
-                              "Continue"
-                            )}
-                          </button>
-
-                          {originalDimensions && (
-                            <button
-                              type="button"
-                              onClick={handleReset}
-                              disabled={isResizing}
-                              className="flex-1 px-4 py-2 rounded-lg bg-white border-2 border-amber-600 text-amber-700 font-semibold text-xs hover:shadow-lg hover:bg-amber-50 hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-1"
-                            >
-                              <ArrowPathIcon className="w-3 h-3" />
-                              Reset
-                            </button>
-                          )}
-                        </div>
-
-                        <div className="flex items-center justify-center py-0.5">
-                          <div className="flex-grow border-t border-gray-300" />
-                          <span className="px-3 text-xs text-gray-400">or</span>
-                          <div className="flex-grow border-t border-gray-300" />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setShowEditProportions(false)}
-                          disabled={isResizing}
-                          className="w-full px-4 py-2 rounded-lg bg-white border border-gray-300 text-gray-600 font-medium text-xs hover:bg-gray-50 hover:border-gray-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  </div>
+                    {limitModalType === "GUEST" ? (
+                      <button
+                        type="button"
+                        className="inline-flex justify-center w-full sm:w-auto rounded-xl border border-transparent bg-indigo-600 px-6 py-3 text-sm font-bold text-white hover:bg-indigo-700 focus:outline-none shadow-lg shadow-indigo-200 hover:shadow-xl transition-all"
+                        onClick={() => {
+                          setLimitModalType(null);
+                          window.location.href = "/login";
+                        }}
+                      >
+                        Log In / Sign Up
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled
+                        className="inline-flex justify-center w-full sm:w-auto rounded-xl border border-transparent bg-indigo-400 px-6 py-3 text-sm font-bold text-white cursor-not-allowed opacity-80 shadow-md"
+                      >
+                        Payment Coming Soon...
+                      </button>
+                    )}
                   </div>
                 </Dialog.Panel>
               </Transition.Child>
@@ -1403,6 +1547,7 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
           </div>
         </Dialog>
       </Transition>
+
     </>
   );
 }

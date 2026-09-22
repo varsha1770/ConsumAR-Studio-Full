@@ -52,7 +52,7 @@ export default function FaqSection() {
   const [openFaq, setOpenFaq] = useState<number | null>(null);
 
   return (
-    <div className="mt-24 w-full max-w-4xl mx-auto px-4 pb-48 flex flex-col items-center animate-in fade-in slide-in-from-bottom-10 duration-1000 delay-1000">
+    <div className="mt-24 w-full max-w-4xl mx-auto px-4 flex flex-col items-center animate-in fade-in slide-in-from-bottom-10 duration-1000 delay-1000">
       <div className="text-center mb-16">
         <h2 className="text-3xl font-semibold text-gray-900 mb-4">Frequently Asked Questions</h2>
         <p className="text-gray-400 text-lg font-light">Find answers to common questions about this tool.</p>
@@ -61,7 +61,7 @@ export default function FaqSection() {
       <div className="space-y-5 w-full">
         {faqs.map((faq, idx) => (
           <div key={idx} className="bg-white border border-gray-200 rounded-xl overflow-hidden transition-all duration-300 shadow-sm hover:shadow-md w-full">
-            <button 
+            <button
               onClick={() => setOpenFaq(openFaq === idx ? null : idx)}
               className="w-full px-6 py-5 flex items-center justify-between text-left group"
             >
@@ -72,7 +72,7 @@ export default function FaqSection() {
                 </svg>
               </div>
             </button>
-            <div 
+            <div
               className={`overflow-hidden transition-all duration-[400ms] ease-in-out ${openFaq === idx ? "max-h-[500px] opacity-100" : "max-h-0 opacity-0"}`}
             >
               <div className="px-6 pb-6 pt-2 border-t border-gray-50">

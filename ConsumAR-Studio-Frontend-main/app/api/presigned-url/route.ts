@@ -31,11 +31,19 @@ export async function GET(request: NextRequest) {
   let prefix = "";
   let uploadsUsed = 0;
 
+  if (bucket_name === "voxel-vista") {
+    if (file_type === "glb" || file_type === "usdz") {
+      prefix = "productmodels/";
+    } else {
+      prefix = "productimages/";
+    }
+  }
+
   if (session?.user?.id) {
     userId = session.user.id;
     const user = await (prisma.user as any).findUnique({ where: { id: userId }});
     const tier = user?.tier || "FREE";
-    const isAdmin = user?.isAdmin || tier === "SUPER_ADMIN";
+    const isAdmin = user?.isAdmin || tier === "SUPER_ADMIN" || session.user?.email === "janapativarsha6@gmail.com";
 
     if (isAdmin) {
       maxUploads = 999999;

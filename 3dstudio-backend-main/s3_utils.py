@@ -4,8 +4,8 @@ import boto3
 import shutil
 import tempfile
 
-S3_BUCKET = "glb-output"
-S3_FOLDER = "temp"
+S3_BUCKET = "voxel-vista"
+S3_FOLDER = "productmodels"
 REGION = "ap-south-1"
 
 # V45: Unified Storage - ensure cloud downloads land in the server's storage folder
@@ -69,8 +69,8 @@ def download_from_s3(s3_key):
 
     # 3. SMART KEY PREPARATION
     filename = os.path.basename(normalized_key)
-    buckets_to_try = [S3_BUCKET, "tryitproductmodels"]
-    keys_to_try = [s3_key, filename, f"temp/{filename}"]
+    buckets_to_try = [S3_BUCKET, "voxel-vista", "glb-output", "tryitproductmodels"]
+    keys_to_try = [s3_key, filename, f"productmodels/{filename}", f"temp/{filename}"]
     
     # Cleanup keys (Key Shield)
     keys_to_try = [k for k in keys_to_try if k and ":" not in k and "\\" not in k]

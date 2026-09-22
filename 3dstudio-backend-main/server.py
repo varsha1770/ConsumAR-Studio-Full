@@ -6,6 +6,11 @@ import trimesh
 import numpy as np
 
 from PIL import Image
+try:
+    import importlib
+    importlib.import_module("pillow_avif")
+except Exception:
+    pass
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS, cross_origin
 

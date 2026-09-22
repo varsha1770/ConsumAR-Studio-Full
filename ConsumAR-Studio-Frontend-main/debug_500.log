@@ -1,0 +1,53 @@
+[2026-07-10T10:16:40.681Z] === NEW REQUEST ===
+[2026-07-10T10:16:40.700Z] Session: false, IP: 1.2.3.196, MAC: test_0.8996603168973335
+[2026-07-10T10:16:40.701Z] Executing Guest Logic
+[2026-07-10T10:16:40.868Z] Guest ID: 0f0db2cc-168b-44a8-9ac1-ab7f100915f6
+[2026-07-10T10:16:40.869Z] Parsing form data...
+[2026-07-10T10:16:40.877Z] Files count: 1
+[2026-07-10T10:16:40.878Z] Building EC2 form...
+[2026-07-10T10:16:40.880Z] Fetching from EC2: http://13.232.237.176:5000/run
+[2026-07-10T10:17:01.641Z] EC2 Fetch returned status: 200
+[2026-07-10T10:17:01.644Z] EC2 Text length: 2025
+[2026-07-10T10:17:01.644Z] Parsing JSON from EC2...
+[2026-07-10T10:17:01.646Z] Logging history and usage...
+[2026-07-10T10:17:01.660Z] Usage updated successfully.
+[2026-07-10T10:17:01.660Z] Returning SUCCESS response.
+[2026-07-10T10:21:00.013Z] === NEW REQUEST ===
+[2026-07-10T10:21:00.083Z] Session: true, IP: ::1, MAC: guest_ji7ja9gst6_1778178717303
+[2026-07-10T10:21:00.086Z] Executing User Logic
+[2026-07-10T10:21:00.117Z] CAUGHT ERROR: PrismaClientKnownRequestError - 
+Invalid `prisma.$queryRawUnsafe()` invocation:
+
+
+Raw query failed. Code: `42883`. Message: `ERROR: operator does not exist: "Tier" = text
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.`
+PrismaClientKnownRequestError: 
+Invalid `prisma.$queryRawUnsafe()` invocation:
+
+
+Raw query failed. Code: `42883`. Message: `ERROR: operator does not exist: "Tier" = text
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.`
+    at ei.handleRequestError (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\@prisma\client\runtime\library.js:121:7268)
+    at ei.handleAndLogRequestError (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\@prisma\client\runtime\library.js:121:6593)
+    at ei.request (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\@prisma\client\runtime\library.js:121:6300)
+    at async a (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\@prisma\client\runtime\library.js:130:9551)
+    at async POST (webpack-internal:///(rsc)/./app/api/generate-3d/route.ts:39:32)
+    at async AppRouteRouteModule.do (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\compiled\next-server\app-route.runtime.dev.js:5:37866)
+    at async AppRouteRouteModule.handle (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\compiled\next-server\app-route.runtime.dev.js:5:45156)
+    at async responseGenerator (webpack-internal:///(rsc)/./node_modules/next/dist/build/webpack/loaders/next-app-loader/index.js?name=app%2Fapi%2Fgenerate-3d%2Froute&page=%2Fapi%2Fgenerate-3d%2Froute&appPaths=&pagePath=private-next-app-dir%2Fapi%2Fgenerate-3d%2Froute.ts&appDir=C%3A%5CUsers%5CHi%5CDownloads%5CConsumAR-Studio-Frontend-main%5CConsumAR-Studio-Frontend-main%5Capp&pageExtensions=tsx&pageExtensions=ts&pageExtensions=jsx&pageExtensions=js&rootDir=C%3A%5CUsers%5CHi%5CDownloads%5CConsumAR-Studio-Frontend-main%5CConsumAR-Studio-Frontend-main&isDev=true&tsconfigPath=&basePath=&assetPrefix=&nextConfigOutput=&preferredRegion=&middlewareConfig=e30%3D&isGlobalNotFoundEnabled=!:230:38)
+    at async AppRouteRouteModule.handleResponse (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\compiled\next-server\app-route.runtime.dev.js:1:191863)
+    at async handleResponse (webpack-internal:///(rsc)/./node_modules/next/dist/build/webpack/loaders/next-app-loader/index.js?name=app%2Fapi%2Fgenerate-3d%2Froute&page=%2Fapi%2Fgenerate-3d%2Froute&appPaths=&pagePath=private-next-app-dir%2Fapi%2Fgenerate-3d%2Froute.ts&appDir=C%3A%5CUsers%5CHi%5CDownloads%5CConsumAR-Studio-Frontend-main%5CConsumAR-Studio-Frontend-main%5Capp&pageExtensions=tsx&pageExtensions=ts&pageExtensions=jsx&pageExtensions=js&rootDir=C%3A%5CUsers%5CHi%5CDownloads%5CConsumAR-Studio-Frontend-main%5CConsumAR-Studio-Frontend-main&isDev=true&tsconfigPath=&basePath=&assetPrefix=&nextConfigOutput=&preferredRegion=&middlewareConfig=e30%3D&isGlobalNotFoundEnabled=!:293:32)
+    at async Module.handler (webpack-internal:///(rsc)/./node_modules/next/dist/build/webpack/loaders/next-app-loader/index.js?name=app%2Fapi%2Fgenerate-3d%2Froute&page=%2Fapi%2Fgenerate-3d%2Froute&appPaths=&pagePath=private-next-app-dir%2Fapi%2Fgenerate-3d%2Froute.ts&appDir=C%3A%5CUsers%5CHi%5CDownloads%5CConsumAR-Studio-Frontend-main%5CConsumAR-Studio-Frontend-main%5Capp&pageExtensions=tsx&pageExtensions=ts&pageExtensions=jsx&pageExtensions=js&rootDir=C%3A%5CUsers%5CHi%5CDownloads%5CConsumAR-Studio-Frontend-main%5CConsumAR-Studio-Frontend-main&isDev=true&tsconfigPath=&basePath=&assetPrefix=&nextConfigOutput=&preferredRegion=&middlewareConfig=e30%3D&isGlobalNotFoundEnabled=!:347:13)
+    at async DevServer.renderToResponseWithComponentsImpl (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\base-server.js:1442:9)
+    at async DevServer.renderPageComponent (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\base-server.js:1494:24)
+    at async DevServer.renderToResponseImpl (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\base-server.js:1544:32)
+    at async DevServer.pipeImpl (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\base-server.js:1038:25)
+    at async NextNodeServer.handleCatchallRenderRequest (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\next-server.js:395:17)
+    at async DevServer.handleRequestImpl (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\base-server.js:929:17)
+    at async C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\dev\next-dev-server.js:387:20
+    at async Span.traceAsyncFn (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\trace\trace.js:157:20)
+    at async DevServer.handleRequest (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\dev\next-dev-server.js:383:24)
+    at async invokeRender (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\lib\router-server.js:248:21)
+    at async handleRequest (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\lib\router-server.js:447:24)
+    at async requestHandlerImpl (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\lib\router-server.js:496:13)
+    at async Server.requestListener (C:\Users\Hi\Downloads\ConsumAR-Studio-Frontend-main\ConsumAR-Studio-Frontend-main\node_modules\next\dist\server\lib\start-server.js:226:13)

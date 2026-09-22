@@ -4,10 +4,10 @@ import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import StudioHeader from "@/components/StudioHeader";
 import { toast } from "react-hot-toast";
-import { 
-  ClockIcon, 
-  DocumentIcon, 
-  ChartBarIcon, 
+import {
+  ClockIcon,
+  DocumentIcon,
+  ChartBarIcon,
   ArrowTopRightOnSquareIcon,
   CloudIcon
 } from "@heroicons/react/24/outline";
@@ -87,35 +87,42 @@ export default function LogsPage() {
     <div className="min-h-screen bg-[#f8fafc] text-slate-900">
       <StudioHeader />
 
-      <main className="relative z-10 container mx-auto pt-12 pb-24 max-w-6xl px-6 lg:px-8">
-        <div className="mb-12">
-          <h1 className="text-4xl font-extrabold tracking-tight text-slate-900">
+      <main className="relative z-10 container mx-auto pt-8 md:pt-12 pb-16 md:pb-24 max-w-6xl px-4 sm:px-6 lg:px-8">
+
+        {/* HEADER SECTION */}
+        <div className="mb-10 md:mb-14 text-center md:text-left">
+          <h1 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-slate-900 tracking-tight">
             Active <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-purple-600">Logs</span>
           </h1>
-          <p className="mt-4 text-lg text-slate-500 font-medium">
+          <p className="mt-2 sm:mt-3 md:mt-4 text-sm sm:text-base md:text-lg text-slate-600 font-medium leading-relaxed max-w-2xl mx-auto md:mx-0">
             A granular timeline of your 3D transformations and asset activity.
           </p>
         </div>
 
-        <div className="bg-white rounded-[2rem] border border-gray-100 shadow-xl overflow-hidden animate-in fade-in slide-in-from-bottom-8 duration-700">
-          <div className="px-8 py-6 border-b border-gray-50 flex items-center justify-between bg-gray-50/30">
-            <h2 className="text-xl font-bold text-slate-900 flex items-center gap-3">
-              <ClockIcon className="w-6 h-6 text-blue-600" />
+
+        {/* TABLE CARD */}
+        <div className="bg-white rounded-2xl md:rounded-[2rem] border border-gray-100 shadow-xl overflow-hidden animate-in fade-in slide-in-from-bottom-8 duration-700">
+
+          {/* CARD HEADER */}
+          <div className="px-5 sm:px-8 py-5 md:py-6 border-b border-gray-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-gray-50/30">
+            <h2 className="text-lg md:text-xl font-bold text-slate-900 flex items-center gap-2 md:gap-3">
+              <ClockIcon className="w-5 h-5 md:w-6 md:h-6 text-blue-600" />
               Activity Ledger
             </h2>
-            <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]">
+            <div className="text-[9px] md:text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] self-start sm:self-auto">
               Real-time synchronization active
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
+          {/* RESPONSIVE TABLE CONTAINER */}
+          <div className="overflow-x-auto pb-4 sm:pb-0">
+            <table className="w-full text-left min-w-[700px]">
               <thead>
                 <tr className="bg-gray-50/50">
-                  <th className="px-8 py-4 text-[10px] font-black uppercase text-gray-400 tracking-widest">Time & Status</th>
-                  <th className="px-8 py-4 text-[10px] font-black uppercase text-gray-400 tracking-widest">Operation</th>
-                  <th className="px-8 py-4 text-[10px] font-black uppercase text-gray-400 tracking-widest">Asset Details</th>
-                  <th className="px-8 py-4 text-[10px] font-black uppercase text-gray-400 tracking-widest text-right">Actions</th>
+                  <th className="px-5 sm:px-8 py-3 sm:py-4 text-[9px] md:text-[10px] font-black uppercase text-gray-400 tracking-widest whitespace-nowrap">Time & Status</th>
+                  <th className="px-5 sm:px-8 py-3 sm:py-4 text-[9px] md:text-[10px] font-black uppercase text-gray-400 tracking-widest whitespace-nowrap">Operation</th>
+                  <th className="px-5 sm:px-8 py-3 sm:py-4 text-[9px] md:text-[10px] font-black uppercase text-gray-400 tracking-widest whitespace-nowrap">Asset Details</th>
+                  <th className="px-5 sm:px-8 py-3 sm:py-4 text-[9px] md:text-[10px] font-black uppercase text-gray-400 tracking-widest text-right whitespace-nowrap">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
@@ -123,70 +130,80 @@ export default function LogsPage() {
                   const isExpired = getDaysUntilExpiry(item.createdAt) === 0;
                   return (
                     <tr key={item.id} className={`group transition-all hover:bg-blue-50/20 ${isExpired ? "opacity-40" : ""}`}>
-                      <td className="px-8 py-6">
+
+                      {/* TIME & STATUS */}
+                      <td className="px-5 sm:px-8 py-4 sm:py-6">
                         <div className="flex flex-col">
-                          <span className="text-sm font-bold text-slate-900">
+                          <span className="text-xs sm:text-sm font-bold text-slate-900">
                             {new Date(item.createdAt).toLocaleDateString([], { day: '2-digit', month: 'short' })}
                           </span>
-                          <span className="text-[10px] text-gray-400 font-bold">
+                          <span className="text-[9px] sm:text-[10px] text-gray-400 font-bold mt-0.5">
                             {new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </span>
-                          <span className={`text-[9px] font-black mt-1 uppercase ${isExpired ? "text-red-500" : "text-blue-500"}`}>
+                          <span className={`text-[8px] sm:text-[9px] font-black mt-1.5 uppercase ${isExpired ? "text-red-500" : "text-blue-500"}`}>
                             {isExpired ? "EXPIRED" : `EXPIRES IN ${getDaysUntilExpiry(item.createdAt)}D`}
                           </span>
                         </div>
                       </td>
-                      <td className="px-8 py-6">
-                        <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider ${
-                          (item.action === 'CONVERT' || item.action === 'CONVERSION') ? 'bg-purple-100 text-purple-700' :
+
+                      {/* OPERATION PILL */}
+                      <td className="px-5 sm:px-8 py-4 sm:py-6">
+                        <span className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-full text-[8px] sm:text-[9px] font-black uppercase tracking-wider ${(item.action === 'CONVERT' || item.action === 'CONVERSION') ? 'bg-purple-100 text-purple-700' :
                           item.action === 'RESIZE' ? 'bg-blue-100 text-blue-700' :
-                          'bg-green-100 text-green-700'
-                        }`}>
+                            'bg-green-100 text-green-700'
+                          }`}>
                           {item.action}
                         </span>
                       </td>
-                      <td className="px-8 py-6">
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center text-gray-400 group-hover:bg-white transition-colors">
-                            <DocumentIcon className="w-4 h-4" />
+
+                      {/* ASSET DETAILS */}
+                      <td className="px-5 sm:px-8 py-4 sm:py-6">
+                        <div className="flex items-center gap-2 sm:gap-3">
+                          <div className="w-7 h-7 sm:w-8 sm:h-8 bg-gray-100 rounded-lg flex items-center justify-center text-gray-400 group-hover:bg-white transition-colors shrink-0">
+                            <DocumentIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                           </div>
                           <div className="flex flex-col">
-                            <span className="text-sm font-bold text-slate-700 max-w-xs truncate">{item.fileName}</span>
-                            <span className="text-[10px] text-gray-400 truncate max-w-[200px]">{item.details}</span>
+                            <span className="text-xs sm:text-sm font-bold text-slate-700 max-w-[150px] sm:max-w-[200px] md:max-w-xs truncate">{item.fileName}</span>
+                            <span className="text-[9px] sm:text-[10px] text-gray-400 truncate max-w-[150px] sm:max-w-[200px] mt-0.5">{item.details}</span>
                           </div>
                         </div>
                       </td>
-                      <td className="px-8 py-6 text-right">
-                        <div className="flex flex-col items-end gap-2">
-                           <div className="flex items-center gap-2">
-                             {!isExpired && item.glbFile && (
-                                <button 
-                                  onClick={() => handleDownload(item.id, "history", item.glbFile!, "model.glb")}
-                                  className="p-2 hover:bg-white rounded-lg transition-all hover:shadow-md text-gray-400 hover:text-blue-600"
-                                >
-                                  <ArrowTopRightOnSquareIcon className="w-4 h-4" />
-                                </button>
-                             )}
-                             {!isExpired && item.usdzFile && (
-                                <button 
-                                  onClick={() => handleDownload(item.id, "history", item.usdzFile!, "model.usdz")}
-                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 text-white text-[9px] font-black rounded-lg hover:bg-blue-600 transition-all shadow-sm"
-                                >
-                                  <CloudIcon className="w-3.5 h-3.5" />
-                                  USDZ
-                                </button>
-                             )}
-                           </div>
-                           <span className="text-[9px] font-bold text-gray-400">Downloads: {item.downloadCount}/{maxDownloads}</span>
+
+                      {/* ACTIONS */}
+                      <td className="px-5 sm:px-8 py-4 sm:py-6 text-right">
+                        <div className="flex flex-col items-end gap-1.5 sm:gap-2">
+                          <div className="flex items-center gap-1.5 sm:gap-2">
+                            {!isExpired && item.glbFile && (
+                              <button
+                                onClick={() => handleDownload(item.id, "history", item.glbFile!, "model.glb")}
+                                className="p-1.5 sm:p-2 hover:bg-white rounded-lg transition-all hover:shadow-md text-gray-400 hover:text-blue-600"
+                                title="Download GLB"
+                              >
+                                <ArrowTopRightOnSquareIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                              </button>
+                            )}
+                            {!isExpired && item.usdzFile && (
+                              <button
+                                onClick={() => handleDownload(item.id, "history", item.usdzFile!, "model.usdz")}
+                                className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1 sm:py-1.5 bg-slate-900 text-white text-[8px] sm:text-[9px] font-black tracking-widest rounded-md sm:rounded-lg hover:bg-blue-600 transition-all shadow-sm"
+                              >
+                                <CloudIcon className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                                USDZ
+                              </button>
+                            )}
+                          </div>
+                          <span className="text-[8px] sm:text-[9px] font-bold text-gray-400">Downloads: {item.downloadCount}/{maxDownloads}</span>
                         </div>
                       </td>
                     </tr>
                   );
                 })}
+
+                {/* EMPTY STATE */}
                 {history.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="px-8 py-24 text-center">
-                      <p className="text-gray-400 font-bold uppercase tracking-widest">No activity logged yet</p>
+                    <td colSpan={4} className="px-5 sm:px-8 py-16 md:py-24 text-center">
+                      <p className="text-gray-400 font-bold uppercase tracking-widest text-xs">No activity logged yet</p>
                     </td>
                   </tr>
                 )}

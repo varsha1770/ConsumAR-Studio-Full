@@ -4,6 +4,7 @@ import CredentialsProvider from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import prisma from "@/lib/prisma";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 
 export const validateEmail = (email: string) => {
   // Regex: Presence of @ and ., No whitespace
@@ -39,89 +40,95 @@ export const authOptions: NextAuthOptions = {
       allowDangerousEmailAccountLinking: true,
     }),
     CredentialsProvider({
-      name: "ConsumAR Login",
+      id: "otp",
+      name: "OTP Login",
       credentials: {
         email: { label: "Email", type: "text" },
-        password: { label: "Password", type: "password" }
+        otp: { label: "OTP", type: "text" }
       },
       async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) return null;
+        if (!credentials?.email || !credentials?.otp) return null;
         
         const loginEmail = normalizeEmail(credentials.email);
-        const loginPassword = credentials.password;
         
-        console.log("[nextauth] Postgres Identity Check for:", loginEmail);
-
-        // 1. Find user in PostgreSQL
+        // Find user
         const user = await prisma.user.findUnique({
           where: { email: loginEmail }
         });
 
-        if (user) {
-          console.log("[nextauth] Existing user found in Postgres:", user.email);
-          
-          // If the user signed up via Google, they won't have a password set.
-          if (!user.password) {
-            console.log("[nextauth] LOGIN DENIED: This account was created via Google. Please use the 'Sign in with Google' button.");
-            return null;
-          }
+        if (!user) throw new Error("No account found with this email.");
 
-          // Check password using Bcrypt
-          const isMatch = await bcrypt.compare(loginPassword, user.password);
-
-          if (isMatch) {
-            await prisma.user.update({
-              where: { id: user.id },
-              data: { lastLogin: new Date() } as any
-            });
-            return { id: user.id, email: user.email, name: user.email.split("@")[0], isAdmin: (user as any).isAdmin };
-          } 
-          
-          // LEGACY FALLBACK: Check if this is an old plaintext password
-          if (!isMatch && user.password === loginPassword) {
-            console.log("[nextauth] LEGACY DETECTED: Upgrading user to Hashed Security...");
-            const salt = await bcrypt.genSalt(10);
-            const upgradedPassword = await bcrypt.hash(loginPassword, salt);
-            
-            await prisma.user.update({
-              where: { id: user.id },
-              data: { 
-                password: upgradedPassword, 
-                lastLogin: new Date() 
-              } as any
-            });
-            
-            return { id: user.id, email: user.email, name: user.email.split("@")[0], isAdmin: (user as any).isAdmin };
-          }
-
-          console.log("[nextauth] Password mismatch for existing user.");
-          return null;
-        } 
-        
-        // 2. AUTO-SIGNUP: If user doesn't exist, CREATE THEM NOW in PostgreSQL
-        console.log("[nextauth] NEW USER DETECTED! Auto-creating PostgreSQL account...");
-
-        if (!validateEmail(loginEmail) || !validatePassword(loginPassword)) {
-          console.error("[nextauth] Validation failed for auto-signup.");
-          return null;
-        }
-
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(loginPassword, salt);
-
-        const newUser = await prisma.user.create({
-          data: {
-            email: loginEmail,
-            password: hashedPassword,
-            lastLogin: new Date()
-          } as any
+        // Find latest unused auth request
+        const authRequest = await prisma.authRequest.findFirst({
+          where: {
+            userId: user.id,
+            isUsed: false,
+            expiresAt: { gt: new Date() }
+          },
+          orderBy: { createdAt: 'desc' }
         });
 
-        console.log("[nextauth] Auto-Signup SUCCESS in Postgres for:", loginEmail);
+        if (!authRequest) throw new Error("Invalid or expired OTP. Please request a new one.");
+
+        // Check OTP
+        const isMatch = await bcrypt.compare(credentials.otp, authRequest.otpHash);
+        if (!isMatch) throw new Error("Incorrect OTP.");
+
+        // Mark as used
+        await prisma.authRequest.update({
+          where: { id: authRequest.id },
+          data: { isUsed: true }
+        });
+
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { lastLogin: new Date() } as any
+        });
+
+        return { id: user.id, email: user.email, name: user.email.split("@")[0], isAdmin: (user as any).isAdmin };
+      }
+    }),
+    CredentialsProvider({
+      id: "magic-link",
+      name: "Magic Link Login",
+      credentials: {
+        token: { label: "Token", type: "text" }
+      },
+      async authorize(credentials) {
+        if (!credentials?.token) return null;
+
+        const tokenHash = crypto.createHash('sha256').update(credentials.token).digest('hex');
+
+        // Find auth request
+        const authRequest = await prisma.authRequest.findFirst({
+          where: {
+            tokenHash,
+            isUsed: false,
+            expiresAt: { gt: new Date() }
+          },
+          include: { user: true }
+        });
+
+        if (!authRequest || !authRequest.user) {
+          throw new Error("Invalid or expired Magic Link. Please request a new one.");
+        }
+
+        // Mark as used
+        await prisma.authRequest.update({
+          where: { id: authRequest.id },
+          data: { isUsed: true }
+        });
+
+        await prisma.user.update({
+          where: { id: authRequest.user.id },
+          data: { lastLogin: new Date() } as any
+        });
+
         return { 
-          id: newUser.id, 
-          email: newUser.email, 
-          name: newUser.email.split("@")[0] 
+          id: authRequest.user.id, 
+          email: authRequest.user.email, 
+          name: authRequest.user.email.split("@")[0], 
+          isAdmin: (authRequest.user as any).isAdmin 
         };
       }
     })

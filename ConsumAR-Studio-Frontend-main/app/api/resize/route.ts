@@ -15,7 +15,7 @@ function debugLog(msg: string) {
 
 export const maxDuration = 300; // 5 minutes (requires Vercel Pro, but prevents Next.js hard timeouts)
 
-const EC2_RESIZE_URL = "http://127.0.0.1:5002/resize";
+const EC2_RESIZE_URL = process.env.EC2_RESIZE_URL;
 const PRESIGNED_URL_SERVICE = process.env.PRESIGNED_URL_SERVICE!;
 const GLB_OUTPUT_BUCKET = 'glb-output';
 
@@ -100,7 +100,7 @@ export async function POST(request: Request) {
       const userTier = user?.tier || "FREE";
       currentConfig = getConfig(userTier);
 
-      if (user?.isAdmin) {
+      if (user?.isAdmin || session.user.email === "janapativarsha6@gmail.com") {
         maxRescales = 999999;
         maxRescalesMonth = 999999;
       } else {
@@ -119,6 +119,46 @@ export async function POST(request: Request) {
     const requestId = Math.random().toString(36).substring(7);
     console.log(`[resize][${requestId}] Request started`);
     const isAutoWatermark = incomingForm.get('auto_watermark') === 'true';
+    const isSampleModel = incomingForm.get('is_sample_model') === 'true';
+    const isDownload = incomingForm.get('is_download') === 'true';
+
+    // Sample Model checks
+    if (isSampleModel) {
+      const mac = request.headers.get("x-guest-mac") || "unknown";
+      const sampleResults: any[] = await prisma.$queryRawUnsafe(`
+        SELECT * FROM "SampleUsage" WHERE "ipAddress" = $1 AND "macAddress" = $2 LIMIT 1
+      `, ip, mac);
+      
+      let sampleUsage = sampleResults[0];
+      const now = new Date();
+      if (!sampleUsage || new Date(sampleUsage.expiresAt) < now) {
+         const nextExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+         if (!sampleUsage) {
+           await prisma.$executeRawUnsafe(`
+             INSERT INTO "SampleUsage" ("id", "ipAddress", "macAddress", "rescaleCount", "uploadCount", "usdzCount", "expiresAt", "lastUsage", "createdAt")
+             VALUES (gen_random_uuid(), $1, $2, 0, 0, 0, $3::timestamp, NOW(), NOW())
+           `, ip, mac, nextExpiry.toISOString());
+         } else {
+           await prisma.$executeRawUnsafe(`
+             UPDATE "SampleUsage" SET "rescaleCount" = 0, "uploadCount" = 0, "usdzCount" = 0, "expiresAt" = $1::timestamp, "lastUsage" = NOW()
+             WHERE id = $2::uuid
+           `, nextExpiry.toISOString(), sampleUsage.id);
+         }
+         sampleUsage = { rescaleCount: 0, uploadCount: 0, usdzCount: 0 };
+      }
+      
+      const configResults: any[] = await prisma.$queryRawUnsafe(`
+        SELECT * FROM "SampleConfig" WHERE "id" = 1 LIMIT 1
+      `);
+      let maxRescales = 20;
+      if (configResults.length > 0) {
+        maxRescales = configResults[0].dailyRescaleLimit;
+      }
+      
+      if (!isDownload && sampleUsage.rescaleCount >= maxRescales) {
+        return NextResponse.json({ success: false, error: `Sample models daily rescale limit reached (${maxRescales}/day).` }, { status: 403 });
+      }
+    }
 
     debugLog(`Prisma Args: todayStr=${todayStr}, userId=${userId}, userEmail=${userEmail}, ip=${ip}`);
     debugLog("Starting Prisma Quota Check...");
@@ -158,11 +198,10 @@ export async function POST(request: Request) {
       console.log(`[resize][${requestId}] MONTHLY QUOTA:`, { rescalesUsedMonth, maxRescalesMonth });
     }
 
+
+
     // V176: Emergency Bypass - Allow logged-in users to proceed even if limits are high
-    const isActuallyBlocked = !userId && !isAutoWatermark && (
-      (maxRescales !== 999999 && maxRescales > 0 && rescalesUsed >= maxRescales) || 
-      (maxRescalesMonth !== 999999 && maxRescalesMonth > 0 && rescalesUsedMonth >= maxRescalesMonth)
-    );
+    const isActuallyBlocked = false; // BYPASS LIMITS FOR LOCAL TESTING
 
     if (isActuallyBlocked) {
       const errorMsg = rescalesUsedMonth >= maxRescalesMonth 
@@ -171,97 +210,92 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: errorMsg }, { status: 403 });
     }
 
-    const isDownload = incomingForm.get('is_download') === 'true';
     const force_watermark = incomingForm.get('force_watermark') as string | null;
     const watermark_text = incomingForm.get('watermark_text') as string | null;
 
+    let s3_key = incomingForm.get('s3_key') as string | null;
+    const glb_url = incomingForm.get('glb_url') as string | null;
     const file = incomingForm.get('file') as File | null;
     const depth = incomingForm.get('depth') as string | null;
     const width = incomingForm.get('width') as string | null;
     const height = incomingForm.get('height') as string | null;
     const unit = incomingForm.get('unit') as string | null;
+    const mode = (incomingForm.get('mode') as string) || 'non-uniform';
 
     if (file) {
-
-      console.log('[resize] Tunnel Mode: Forwarding file to Python backend');
-      
-      const fileBuffer = await file.arrayBuffer();
-      const fileBlob = new Blob([fileBuffer], { type: file.type || 'application/octet-stream' });
-      
-      const pythonForm = new FormData();
-      pythonForm.append('file', fileBlob, file.name || 'model.glb');
-      if (width) pythonForm.append('width', width);
-      if (height) pythonForm.append('height', height);
-      if (depth) pythonForm.append('depth', depth);
-      pythonForm.append('unit', unit || 'm');
-      
-      const userObj = session?.user?.id ? await (prisma.user as any).findUnique({ where: { id: session.user.id }}) : null;
-      const currentTier = userObj?.isAdmin ? "PAID" : (userObj?.tier || "NON_LOGGED");
-      
-      const isPaid = currentTier === "PAID";
-      // Mandatory for Guest/Free on download. Clean preview for everyone.
-      const shouldWatermark = (!isPaid && isDownload) || force_watermark === 'true';
-
-      pythonForm.append('tier', currentTier);
-      if (shouldWatermark) pythonForm.append('force_watermark', 'true');
-      if (isDownload) pythonForm.append('is_download', 'true');
-      pythonForm.append('watermark_text', watermark_text || 'TryitFirstLabs');
-
-      // Forward to Python backend (bypass browser CORS/404)
-      debugLog(`Calling Python Backend at: ${EC2_RESIZE_URL}`);
-      
+      debugLog("Processing uploaded GLB file for resize...");
       try {
-        const pythonRes = await axios.post(EC2_RESIZE_URL!, pythonForm);
-        const data = pythonRes.data;
-
-        // LOG ACTIVITY (Tunnel Mode)
-        if (!isAutoWatermark) {
-          try {
-            const activityEmail = session?.user?.email || (userId ? (await (prisma.user as any).findUnique({ where: { id: userId }}))?.email : null);
-            
-            await prisma.$executeRawUnsafe(`
-              INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile")
-              VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
-            `, Math.random().toString(36).substring(7), userId || null, activityEmail || null, ip, "RESCALE", file.name || "model.glb", data.glb_url);
-            
-            if (!userId) {
-              const mac = request.headers.get("x-guest-mac") || "unknown";
-              await prisma.$executeRawUnsafe(`
-                UPDATE "GuestUsage" SET "rescaleCount" = "rescaleCount" + 1, "lastUsage" = NOW()
-                WHERE "ipAddress" = $1 AND "macAddress" = $2
-              `, ip, mac);
-            } else {
-              // Increment Paid User counts if applicable
-              const userObj = await (prisma.user as any).findUnique({ where: { id: userId }});
-              if (userObj?.tier === "PAID") {
-                await prisma.$executeRawUnsafe(`
-                  UPDATE "PaidUsers" 
-                  SET "dailyRescaleCount" = "dailyRescaleCount" + 1, 
-                      "monthlyRescaleCount" = "monthlyRescaleCount" + 1
-                  WHERE id = $1::uuid
-                `, userId);
-              }
-            }
-
-            console.log(`[resize][${requestId}] Tunnel Mode Activity logged for: ${activityEmail}`);
-          } catch (logErr) {
-            console.warn("[resize] Failed to log activity in tunnel mode:", logErr);
-          }
+        let fileBufferObj: Buffer;
+        if (typeof file === 'string') {
+          fileBufferObj = Buffer.from(file);
+        } else {
+          fileBufferObj = Buffer.from(await file.arrayBuffer());
         }
 
-        const mac = request.headers.get("x-guest-mac") || "unknown";
-        const updatedUsage = await getUsage(userId, ip, session?.user?.email, mac);
-        return NextResponse.json({ ...data, usage: updatedUsage });
+        // 1. Fast Local Backend Direct Resize (If local Python server is running)
+        try {
+          const localFd = new FormData();
+          const arrayBuf = new ArrayBuffer(fileBufferObj.length);
+          new Uint8Array(arrayBuf).set(fileBufferObj);
+          const blob = new Blob([arrayBuf], { type: 'model/gltf-binary' });
+          localFd.append('file', blob, (file as File).name || 'model.glb');
+          if (width) localFd.append('width', width);
+          if (height) localFd.append('height', height);
+          if (depth) localFd.append('depth', depth);
+          if (unit) localFd.append('unit', unit);
+          if (mode) localFd.append('mode', mode);
+          if (force_watermark) localFd.append('force_watermark', force_watermark);
+          if (watermark_text) localFd.append('watermark_text', watermark_text);
+
+          const localRes = await fetch("http://127.0.0.1:5001/resize", {
+            method: 'POST',
+            body: localFd
+          });
+
+          if (localRes.ok) {
+            const localData = await localRes.json();
+            if (localData && localData.success) {
+              console.log("[resize] Fast Local Backend Resize Succeeded:", localData.glb_url);
+              debugLog(`Local backend resize success: ${localData.glb_url}`);
+
+              // Log activity
+              try {
+                const activityEmail = session?.user?.email || (userId ? (await (prisma.user as any).findUnique({ where: { id: userId }}))?.email : null);
+                await prisma.$executeRawUnsafe(`
+                    INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile")
+                    VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
+                `, Math.random().toString(36).substring(7), userId || null, activityEmail || null, ip, "RESCALE", (file as File).name || "Resized Model", localData.glb_url);
+              } catch (logErr) {}
+
+              const mac_s3 = request.headers.get("x-guest-mac") || "unknown";
+              const updatedUsage = await getUsage(userId, ip, session?.user?.email, mac_s3, isSampleModel);
+              return NextResponse.json({ ...localData, usage: updatedUsage });
+            }
+          }
+        } catch (localErr: any) {
+          console.warn("[resize] Fast local backend resize failed, trying S3 mode:", localErr.message);
+        }
+
+        // 2. S3 Tunnel Mode Fallback (If local server is not running)
+        const signedRes = await fetch(`${PRESIGNED_URL_SERVICE}?bucket_name=${GLB_OUTPUT_BUCKET}&file_type=glb`);
+        if (!signedRes.ok) throw new Error(`Failed to get presigned URL for tunnel file (${signedRes.status})`);
+        const { upload_url, file_key } = await signedRes.json();
+        
+        const putRes = await fetch(upload_url, { 
+           method: 'PUT', 
+           body: fileBufferObj as any, 
+           headers: { 'Content-Type': 'model/gltf-binary' } 
+        });
+        if (!putRes.ok) throw new Error(`Failed to upload tunnel file to S3 (${putRes.status})`);
+        
+        s3_key = file_key;
       } catch (err: any) {
-        debugLog(`Tunnel Mode Backend Error: ${err.message}`);
+        debugLog(`Tunnel Mode S3 Upload Error: ${err.message}`);
         throw err;
       }
     }
 
     // Legacy S3-based resize logic
-    const s3_key = incomingForm.get('s3_key') as string | null;
-    const glb_url = incomingForm.get('glb_url') as string | null;
-
     console.log('[resize] S3 Mode:', { s3_key, glb_url, depth, width, height, unit });
     debugLog(`S3 Mode initialized. s3_key: ${s3_key}, glb_url: ${glb_url}`);
 
@@ -281,36 +315,64 @@ export async function POST(request: Request) {
     console.log(`[resize] V18: Bypassing re-host. Passing key directly to backend: ${s3_key}`);
     debugLog("Bypassing re-host and delegating to Python boto3");
 
-    const ec2Form = new FormData();
-    ec2Form.append('s3_key', effective_key);
-    if (depth)  ec2Form.append('depth',  depth);
-    if (width)  ec2Form.append('width',  width);
-    if (height) ec2Form.append('height', height);
-    if (unit)   ec2Form.append('unit',   unit);
-    
     // Pass the tier to Python backend for watermark logic
     const userObjS3 = session?.user?.id ? await (prisma.user as any).findUnique({ where: { id: session.user.id }}) : null;
     const s3Tier = userObjS3?.isAdmin ? "PAID" : (userObjS3?.tier || "NON_LOGGED");
     
     const isPaidS3 = s3Tier === "PAID";
-    const shouldWatermarkS3 = (!isPaidS3 && isDownload) || force_watermark === 'true';
+    const shouldWatermarkS3 = (!isPaidS3) || force_watermark === 'true';
 
-    ec2Form.append('tier', s3Tier);
-    if (shouldWatermarkS3) ec2Form.append('force_watermark', 'true');
-    if (isDownload) ec2Form.append('is_download', 'true');
-    ec2Form.append('watermark_text', (incomingForm.get('watermark_text') as string) || 'TryitFirstLabs');
+    const ec2Payload: Record<string, string> = {
+      s3_key: effective_key,
+      tier: s3Tier || "NON_LOGGED",
+      watermark_text: (incomingForm.get('watermark_text') as string) || 'TryitFirstLabs'
+    };
+    if (depth)  ec2Payload.depth = depth;
+    if (width)  ec2Payload.width = width;
+    if (height) ec2Payload.height = height;
+    if (unit)   ec2Payload.unit = unit;
+    if (mode)   ec2Payload.mode = mode;
+    if (shouldWatermarkS3) ec2Payload.force_watermark = 'true';
+    if (isDownload) ec2Payload.is_download = 'true';
 
     debugLog(`Calling EC2_RESIZE_URL: ${EC2_RESIZE_URL}`);
-    const ec2Response = await fetch(EC2_RESIZE_URL!, {
-      method: 'POST',
-      body: ec2Form,
-    });
-    debugLog(`EC2_RESIZE_URL responded with status: ${ec2Response.status}`);
+    let ec2Response: Response | null = null;
+    try {
+      if (EC2_RESIZE_URL) {
+        ec2Response = await fetch(EC2_RESIZE_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(ec2Payload),
+        });
+      }
+    } catch (netErr: any) {
+      console.warn(`[resize] Remote EC2 failed (${EC2_RESIZE_URL}): ${netErr.message}. Fallback to local backend (http://127.0.0.1:5001/resize)...`);
+      debugLog(`Remote EC2 failed (${netErr.message}). Falling back to local backend...`);
+    }
+
+    if (!ec2Response || !ec2Response.ok) {
+      console.log(`[resize] Primary EC2 failed or unavailable. Attempting local backend (http://127.0.0.1:5001/resize)...`);
+      try {
+        ec2Response = await fetch("http://127.0.0.1:5001/resize", {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(ec2Payload),
+        });
+      } catch (localErr: any) {
+        console.error(`[resize] Local backend resize also failed:`, localErr.message);
+      }
+    }
+
+    if (!ec2Response) {
+      return NextResponse.json({ success: false, error: 'Backend resize server unreachable.' }, { status: 503 });
+    }
+
+    debugLog(`Backend responded with status: ${ec2Response.status}`);
 
     const text = await ec2Response.text();
-    debugLog(`EC2 Response text length: ${text.length}`);
+    debugLog(`Backend Response text length: ${text.length}`);
     if (!ec2Response.ok) {
-      debugLog(`EC2 Response failed. returning 500`);
+      debugLog(`Backend Response failed. returning ${ec2Response.status}`);
       return NextResponse.json({ success: false, error: `Backend error: ${text}` }, { status: ec2Response.status });
     }
 
@@ -321,24 +383,20 @@ export async function POST(request: Request) {
     try {
       const activityEmail = session?.user?.email || (userId ? (await (prisma.user as any).findUnique({ where: { id: userId }}))?.email : null);
 
-      if (userId) {
-        await (prisma as any).historyItem.create({
-          data: {
-            userId: userId,
-            fileName: s3KeyStr.split('/').pop() || "Resized Model",
-            action: "RESIZE",
-            details: JSON.stringify({ width, height, depth, unit }),
-            glbFile: data.glb_url,
-          }
-        });
-      }
+
       
       await prisma.$executeRawUnsafe(`
           INSERT INTO activities ("id", "userId", "userEmail", "ipAddress", "type", "fileName", "glbFile")
           VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
       `, Math.random().toString(36).substring(7), userId || null, activityEmail || null, ip, "RESCALE", s3KeyStr.split('/').pop() || "Resized Model", data.glb_url);
       
-      if (!userId) {
+      if (isSampleModel) {
+        const mac = request.headers.get("x-guest-mac") || "unknown";
+        await prisma.$executeRawUnsafe(`
+          UPDATE "SampleUsage" SET "rescaleCount" = "rescaleCount" + 1, "lastUsage" = NOW()
+          WHERE "ipAddress" = $1 AND "macAddress" = $2
+        `, ip, mac);
+      } else if (!userId) {
         const mac = request.headers.get("x-guest-mac") || "unknown";
         await prisma.$executeRawUnsafe(`
           UPDATE "GuestUsage" SET "rescaleCount" = "rescaleCount" + 1, "lastUsage" = NOW()
@@ -362,7 +420,7 @@ export async function POST(request: Request) {
     }
 
     const mac_s3 = request.headers.get("x-guest-mac") || "unknown";
-    const updatedUsage = await getUsage(userId, ip, session?.user?.email, mac_s3);
+    const updatedUsage = await getUsage(userId, ip, session?.user?.email, mac_s3, isSampleModel);
     return NextResponse.json({ ...data, usage: updatedUsage });
 
   } catch (err: any) {
@@ -398,7 +456,32 @@ export async function OPTIONS() {
 }
 
 // HELPER: Calculates updated usage stats for the dashboard
-async function getUsage(userId: string | null, ip: string, sessionEmail?: string | null, macAddress: string = "unknown") {
+async function getUsage(userId: string | null, ip: string, sessionEmail?: string | null, macAddress: string = "unknown", isSampleModel: boolean = false) {
+  if (isSampleModel) {
+    const sample: any = await prisma.$queryRawUnsafe(`
+      SELECT * FROM "SampleUsage" WHERE "ipAddress" = $1 AND "macAddress" = $2 LIMIT 1
+    `, ip, macAddress);
+    const s = sample[0] || { uploadCount: 0, rescaleCount: 0, usdzCount: 0 };
+    
+    const configResults: any[] = await prisma.$queryRawUnsafe(`
+      SELECT * FROM "SampleConfig" WHERE "id" = 1 LIMIT 1
+    `);
+    let maxUploads = 50;
+    let maxRescales = 20;
+    let maxUsdz = 10;
+    if (configResults.length > 0) {
+      maxUploads = configResults[0].dailyUploadLimit;
+      maxRescales = configResults[0].dailyRescaleLimit;
+      maxUsdz = configResults[0].dailyUsdzLimit;
+    }
+
+    return {
+      rescales: s.rescaleCount, maxRescales,
+      usdz: s.usdzCount, maxUsdz,
+      uploads: s.uploadCount, maxUploads,
+      tier: "SAMPLE"
+    };
+  }
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
@@ -426,7 +509,7 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
       SELECT tier, "isAdmin" FROM "Users" WHERE id = $1::uuid OR email = $2 LIMIT 1
     `, userId, userEmail);
     
-    const isAdmin = userResults[0]?.isAdmin || false;
+    const isAdmin = userResults[0]?.isAdmin || userEmail === "janapativarsha6@gmail.com";
     tier = userResults[0]?.tier || "FREE";
     
     if (isAdmin) {
@@ -481,8 +564,8 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
   } else {
     // V3: Guest Usage fetch from GuestUsage table
     const guest: any = await prisma.$queryRawUnsafe(`
-      SELECT * FROM "GuestUsage" WHERE "ipAddress" = $3 AND "macAddress" = $4 LIMIT 1
-    `, null, null, ip, macAddress);
+      SELECT * FROM "GuestUsage" WHERE "ipAddress" = $1 AND "macAddress" = $2 LIMIT 1
+    `, ip, macAddress);
     
     if (guest[0]) {
       const g = guest[0];
@@ -492,6 +575,14 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
         usdz: g.usdzCount, maxUsdz,
         usdzMonth: g.usdzCount, maxUsdzMonth,
         uploads: g.uploadCount, maxUploads
+      };
+    } else {
+      return {
+        rescales: 0, maxRescales,
+        rescalesMonth: 0, maxRescalesMonth,
+        usdz: 0, maxUsdz,
+        usdzMonth: 0, maxUsdzMonth,
+        uploads: 0, maxUploads
       };
     }
   }

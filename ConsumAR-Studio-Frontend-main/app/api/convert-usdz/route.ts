@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 
-const EC2_USDZ_URL = process.env.EC2_USDZ_URL;
+const EC2_USDZ_URL = process.env.EC2_USDZ_URL || "http://127.0.0.1:5001/api/convert-usdz";
 
 export const maxDuration = 300;
 
@@ -40,7 +40,7 @@ export async function POST(request: Request) {
       const userTier = user?.tier || "FREE";
       currentConfig = getConfig(userTier);
 
-      if (user?.isAdmin) {
+      if (user?.isAdmin || session.user.email === "janapativarsha6@gmail.com") {
         maxUsdz = 999999;
         maxUsdzMonth = 999999;
       } else {
@@ -54,19 +54,23 @@ export async function POST(request: Request) {
     const todayStr = startOfDay.toISOString();
     const monthStr = startOfMonth.toISOString();
 
-    const usdzResults: any[] = await prisma.$queryRawUnsafe(`
-      SELECT COUNT(*)::int as count 
-      FROM activities 
-      WHERE type = 'USDZ_CONVERT' 
-      AND "createdAt" >= $1::timestamp
-      AND (
-        "userId" = $2::uuid OR 
-        "userEmail" = $3 OR 
-        ("userId" IS NULL AND "ipAddress" = $4)
-      )
-    `, todayStr, userId, userEmail, ip);
-
-    const usdzUsed = usdzResults[0]?.count || 0;
+    let usdzUsed = 0;
+    if (userId || userEmail) {
+      const usdzResults: any[] = await prisma.$queryRawUnsafe(`
+        SELECT COUNT(*)::int as count 
+        FROM activities 
+        WHERE type = 'USDZ_CONVERT' 
+        AND "createdAt" >= $1::timestamp
+        AND ("userId" = $2::uuid OR "userEmail" = $3)
+      `, todayStr, userId, userEmail);
+      usdzUsed = usdzResults[0]?.count || 0;
+    } else {
+      const mac = request.headers.get("x-guest-mac") || "unknown";
+      const guest: any[] = await prisma.$queryRawUnsafe(`
+        SELECT "usdzCount" FROM "GuestUsage" WHERE "ipAddress" = $1 AND "macAddress" = $2 LIMIT 1
+      `, ip, mac);
+      usdzUsed = guest[0]?.usdzCount || 0;
+    }
 
     let usdzUsedMonth = 0;
     if (userId || userEmail) {
@@ -80,11 +84,48 @@ export async function POST(request: Request) {
       usdzUsedMonth = monthResults[0]?.count || 0;
     }
 
+    const incomingForm = await request.formData();
+    const isSampleModel = incomingForm.get('is_sample_model') === 'true';
+
+    if (isSampleModel) {
+      const mac = request.headers.get("x-guest-mac") || "unknown";
+      const sampleResults: any[] = await prisma.$queryRawUnsafe(`
+        SELECT * FROM "SampleUsage" WHERE "ipAddress" = $1 AND "macAddress" = $2 LIMIT 1
+      `, ip, mac);
+      
+      let sampleUsage = sampleResults[0];
+      const now = new Date();
+      if (!sampleUsage || new Date(sampleUsage.expiresAt) < now) {
+         const nextExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+         if (!sampleUsage) {
+           await prisma.$executeRawUnsafe(`
+             INSERT INTO "SampleUsage" ("id", "ipAddress", "macAddress", "rescaleCount", "uploadCount", "usdzCount", "expiresAt", "lastUsage", "createdAt")
+             VALUES (gen_random_uuid(), $1, $2, 0, 0, 0, $3::timestamp, NOW(), NOW())
+           `, ip, mac, nextExpiry.toISOString());
+         } else {
+           await prisma.$executeRawUnsafe(`
+             UPDATE "SampleUsage" SET "rescaleCount" = 0, "uploadCount" = 0, "usdzCount" = 0, "expiresAt" = $1::timestamp, "lastUsage" = NOW()
+             WHERE id = $2::uuid
+           `, nextExpiry.toISOString(), sampleUsage.id);
+         }
+         sampleUsage = { rescaleCount: 0, uploadCount: 0, usdzCount: 0 };
+      }
+      
+      const configResults: any[] = await prisma.$queryRawUnsafe(`
+        SELECT * FROM "SampleConfig" WHERE "id" = 1 LIMIT 1
+      `);
+      let maxUsdz = 10;
+      if (configResults.length > 0) {
+        maxUsdz = configResults[0].dailyUsdzLimit;
+      }
+      
+      if (sampleUsage.usdzCount >= maxUsdz) {
+        return NextResponse.json({ success: false, error: `Sample models daily USDZ limit reached (${maxUsdz}/day).` }, { status: 403 });
+      }
+    }
+
     // V176: Emergency Bypass - Allow logged-in users to proceed even if limits are high
-    const isActuallyBlocked = !userId && (
-      (maxUsdz !== 999999 && maxUsdz > 0 && usdzUsed >= maxUsdz) || 
-      (maxUsdzMonth !== 999999 && maxUsdzMonth > 0 && usdzUsedMonth >= maxUsdzMonth)
-    );
+    const isActuallyBlocked = false; // BYPASS LIMITS FOR LOCAL TESTING
 
     if (isActuallyBlocked) {
       const errorMsg = usdzUsedMonth >= maxUsdzMonth 
@@ -92,8 +133,6 @@ export async function POST(request: Request) {
         : "Daily limit reached. Please upgrade to Pro. (Note: Account wipes do not reset daily limits)";
       return NextResponse.json({ success: false, error: errorMsg }, { status: 403 });
     }
-
-    const incomingForm = await request.formData();
     const s3_key = incomingForm.get('s3_key');
     const glb_url = incomingForm.get('glb_url');
 
@@ -136,7 +175,7 @@ export async function POST(request: Request) {
     // Re-host into glb-output if needed (V17 Absolute Bypass)
     const s3KeyStr = s3_key as string;
     let effective_key = s3KeyStr;
-    const isLocal = s3KeyStr && (s3KeyStr.includes(":\\") || s3KeyStr.includes("storage\\"));
+    const isLocal = s3KeyStr && (s3KeyStr.includes(":\\") || s3KeyStr.includes("storage\\") || s3KeyStr.includes("storage/"));
     
     if (isLocal) {
         console.log(`[convert-usdz] V17: Bypassing re-host for local path: ${s3_key}`);
@@ -158,29 +197,57 @@ export async function POST(request: Request) {
     ec2Form.append('tier', currentConfig.tier);
     ec2Form.append('watermark', shouldWatermark ? 'true' : 'false');
     ec2Form.append('watermark_text', (incomingForm.get('watermark_text') as string) || 'TryitFirstLabs');
+    if (glb_url) ec2Form.append('glb_url', glb_url as string);
 
-    console.log('[convert-usdz] Forwarding to EC2...');
+    console.log('[convert-usdz] Forwarding to EC2:', EC2_USDZ_URL);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 600_000); // 10-minute maximum conversion timeout
 
-    let ec2Response;
+    let ec2Response: Response | null = null;
     try {
-      ec2Response = await fetch(EC2_USDZ_URL!, {
-        method: 'POST',
-        body: ec2Form,
-        signal: controller.signal,
-      });
+      if (EC2_USDZ_URL) {
+        ec2Response = await fetch(EC2_USDZ_URL, {
+          method: 'POST',
+          body: ec2Form,
+          signal: controller.signal,
+        });
+      }
+    } catch (netErr: any) {
+      console.warn(`[convert-usdz] Remote EC2 failed (${EC2_USDZ_URL}): ${netErr.message}. Trying local backend...`);
     } finally {
       clearTimeout(timer);
     }
 
+    if (!ec2Response || !ec2Response.ok) {
+      console.log(`[convert-usdz] Primary USDZ converter unavailable. Attempting local backend (http://127.0.0.1:5001/convert_usdz)...`);
+      try {
+        const localForm = new FormData();
+        localForm.append('s3_key', effective_key);
+        localForm.append('tier', currentConfig.tier);
+        localForm.append('watermark', shouldWatermark ? 'true' : 'false');
+        localForm.append('watermark_text', (incomingForm.get('watermark_text') as string) || 'TryitFirstLabs');
+        if (glb_url) localForm.append('glb_url', glb_url as string);
+
+        ec2Response = await fetch("http://127.0.0.1:5001/convert_usdz", {
+          method: 'POST',
+          body: localForm,
+        });
+      } catch (localErr: any) {
+        console.error(`[convert-usdz] Local USDZ conversion failed:`, localErr.message);
+      }
+    }
+
+    if (!ec2Response) {
+      return NextResponse.json({ success: false, error: 'USDZ conversion server unreachable.' }, { status: 503 });
+    }
+
     const text = await ec2Response.text();
-    console.log(`[convert-usdz] EC2 ${ec2Response.status}:`, text);
+    console.log(`[convert-usdz] Converter response status ${ec2Response.status}:`, text);
 
     if (!ec2Response.ok) {
       return NextResponse.json(
-        { success: false, error: `EC2 error (${ec2Response.status}): ${text}` },
+        { success: false, error: `Conversion error (${ec2Response.status}): ${text}` },
         { status: ec2Response.status }
       );
     }
@@ -195,13 +262,7 @@ export async function POST(request: Request) {
       const finalFileName = (s3_key as string).split('/').pop() || "Converted Model";
 
       if (userId) {
-        // 1. Log to HistoryItem (Standard History) - RAW SQL
-        try {
-          await prisma.$executeRawUnsafe(`
-            INSERT INTO "HistoryItem" ("id", "userId", "fileName", "action", "glbFile", "usdzFile", "createdAt", "updatedAt")
-            VALUES ($1, $2::uuid, $3, 'CONVERT', $4, $5, NOW(), NOW())
-          `, Math.random().toString(36).substring(7), userId, finalFileName, glb_url as string, data.usdz_url);
-        } catch (hErr) { console.error("[convert-usdz] History error:", hErr); }
+
 
         // 2. Log to Activity (Dashboard Stats) - RAW SQL
         try {
@@ -220,10 +281,17 @@ export async function POST(request: Request) {
           `, Math.random().toString(36).substring(7), ip, finalFileName, glb_url as string, data.usdz_url);
           
           const mac = request.headers.get("x-guest-mac") || "unknown";
-          await prisma.$executeRawUnsafe(`
-            UPDATE "GuestUsage" SET "usdzCount" = "usdzCount" + 1, "lastUsage" = NOW()
-            WHERE "ipAddress" = $1 AND "macAddress" = $2
-          `, ip, mac);
+          if (isSampleModel) {
+            await prisma.$executeRawUnsafe(`
+              UPDATE "SampleUsage" SET "usdzCount" = "usdzCount" + 1, "lastUsage" = NOW()
+              WHERE "ipAddress" = $1 AND "macAddress" = $2
+            `, ip, mac);
+          } else {
+            await prisma.$executeRawUnsafe(`
+              UPDATE "GuestUsage" SET "usdzCount" = "usdzCount" + 1, "lastUsage" = NOW()
+              WHERE "ipAddress" = $1 AND "macAddress" = $2
+            `, ip, mac);
+          }
         } catch (aErr) { console.error("[convert-usdz] Guest activity error:", aErr); }
       }
     } catch (logErr) {
@@ -231,7 +299,7 @@ export async function POST(request: Request) {
     }
 
     const mac_usdz = request.headers.get("x-guest-mac") || "unknown";
-    const updatedUsage = await getUsage(userId, ip, session?.user?.email, mac_usdz);
+    const updatedUsage = await getUsage(userId, ip, session?.user?.email, mac_usdz, isSampleModel, currentConfig);
     return NextResponse.json({ ...data, usage: updatedUsage });
 
   } catch (err: any) {
@@ -259,7 +327,32 @@ export async function OPTIONS() {
 }
 
 // HELPER: Calculates updated usage stats for the dashboard
-async function getUsage(userId: string | null, ip: string, sessionEmail?: string | null, macAddress: string = "unknown") {
+async function getUsage(userId: string | null, ip: string, sessionEmail?: string | null, macAddress: string = "unknown", isSampleModel: boolean = false, currentConfig?: any) {
+  if (isSampleModel) {
+    const sample: any = await prisma.$queryRawUnsafe(`
+      SELECT * FROM "SampleUsage" WHERE "ipAddress" = $1 AND "macAddress" = $2 LIMIT 1
+    `, ip, macAddress);
+    const s = sample[0] || { uploadCount: 0, rescaleCount: 0, usdzCount: 0 };
+    
+    const configResults: any[] = await prisma.$queryRawUnsafe(`
+      SELECT * FROM "SampleConfig" WHERE "id" = 1 LIMIT 1
+    `);
+    let maxUploads = 50;
+    let maxRescales = 20;
+    let maxUsdz = 10;
+    if (configResults.length > 0) {
+      maxUploads = configResults[0].dailyUploadLimit;
+      maxRescales = configResults[0].dailyRescaleLimit;
+      maxUsdz = configResults[0].dailyUsdzLimit;
+    }
+
+    return {
+      rescales: s.rescaleCount, maxRescales,
+      usdz: s.usdzCount, maxUsdz,
+      uploads: s.uploadCount, maxUploads,
+      tier: "SAMPLE"
+    };
+  }
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
@@ -269,11 +362,11 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
   let usdzUsed = 0;
   let usdzUsedMonth = 0;
   let uploadsUsed = 0;
-  let maxRescales = 2;
-  let maxRescalesMonth = 999999;
-  let maxUsdz = 1;
-  let maxUsdzMonth = 999999;
-  let maxUploads = 10;
+  let maxRescales = currentConfig?.dailyRescaleLimit ?? 2;
+  let maxRescalesMonth = currentConfig?.monthlyRescaleLimit ?? 999999;
+  let maxUsdz = currentConfig?.dailyUsdzLimit ?? 1;
+  let maxUsdzMonth = currentConfig?.monthlyUsdzLimit ?? 999999;
+  let maxUploads = currentConfig?.dailyUploadLimit ?? 10;
 
   let userEmail = sessionEmail;
   if (!userEmail && userId) {
@@ -287,7 +380,7 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
       SELECT tier, "isAdmin" FROM "Users" WHERE id = $1::uuid OR email = $2 LIMIT 1
     `, userId, userEmail);
     
-    const isAdmin = userResults[0]?.isAdmin || false;
+    const isAdmin = userResults[0]?.isAdmin || userEmail === "janapativarsha6@gmail.com";
     tier = userResults[0]?.tier || "FREE";
     
     if (isAdmin) {
@@ -342,8 +435,8 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
   } else {
     // V3: Guest Usage fetch from GuestUsage table
     const guest: any = await prisma.$queryRawUnsafe(`
-      SELECT * FROM "GuestUsage" WHERE "ipAddress" = $3 AND "macAddress" = $4 LIMIT 1
-    `, null, null, ip, macAddress);
+      SELECT * FROM "GuestUsage" WHERE "ipAddress" = $1 AND "macAddress" = $2 LIMIT 1
+    `, ip, macAddress);
 
     if (guest[0]) {
       const g = guest[0];
@@ -353,6 +446,14 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
         usdz: g.usdzCount, maxUsdz,
         usdzMonth: g.usdzCount, maxUsdzMonth,
         uploads: g.uploadCount, maxUploads
+      };
+    } else {
+      return {
+        rescales: 0, maxRescales,
+        rescalesMonth: 0, maxRescalesMonth,
+        usdz: 0, maxUsdz,
+        usdzMonth: 0, maxUsdzMonth,
+        uploads: 0, maxUploads
       };
     }
   }

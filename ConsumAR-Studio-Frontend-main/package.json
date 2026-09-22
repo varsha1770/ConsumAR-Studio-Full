@@ -3,10 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --webpack",
+    "dev": "next dev -p 3000 --webpack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "node patch-draco.js"
+  },
+  "browser": {
+    "fs": false,
+    "path": false,
+    "crypto": false,
+    "os": false
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",
@@ -21,10 +28,12 @@
     "bcryptjs": "^3.0.3",
     "draco3d": "^1.5.7",
     "lottie-react": "^2.4.1",
+    "mind-ar": "^1.2.5",
     "next": "16.1.6",
     "next-auth": "^4.24.14",
     "nodemailer": "^7.0.13",
     "postcss": "^8.5.6",
+    "qrcode.react": "^4.2.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-dropzone": "^15.0.0",
