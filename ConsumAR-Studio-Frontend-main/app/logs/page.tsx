@@ -57,7 +57,7 @@ export default function LogsPage() {
   const handleDownload = async (id: string, type: string, url: string, fileName: string) => {
     try {
       const downloadEndpoint = `/api/user/download?id=${id}&type=${type}&url=${encodeURIComponent(url)}`;
-      window.open(downloadEndpoint, '_blank');
+      window.location.href = downloadEndpoint;
       setTimeout(fetchHistory, 2000);
     } catch (err) {
       toast.error("Failed to initiate download.");
@@ -175,7 +175,7 @@ export default function LogsPage() {
                           <div className="flex items-center gap-1.5 sm:gap-2">
                             {!isExpired && item.glbFile && (
                               <button
-                                onClick={() => handleDownload(item.id, "history", item.glbFile!, "model.glb")}
+                                onClick={() => handleDownload(item.id, item.details === "Persistent Activity Record" ? "activity" : "history", item.glbFile!, "model.glb")}
                                 className="p-1.5 sm:p-2 hover:bg-white rounded-lg transition-all hover:shadow-md text-gray-400 hover:text-blue-600"
                                 title="Download GLB"
                               >
@@ -184,7 +184,7 @@ export default function LogsPage() {
                             )}
                             {!isExpired && item.usdzFile && (
                               <button
-                                onClick={() => handleDownload(item.id, "history", item.usdzFile!, "model.usdz")}
+                                onClick={() => handleDownload(item.id, item.details === "Persistent Activity Record" ? "activity" : "history", item.usdzFile!, "model.usdz")}
                                 className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1 sm:py-1.5 bg-slate-900 text-white text-[8px] sm:text-[9px] font-black tracking-widest rounded-md sm:rounded-lg hover:bg-blue-600 transition-all shadow-sm"
                               >
                                 <CloudIcon className="w-3 h-3 sm:w-3.5 sm:h-3.5" />

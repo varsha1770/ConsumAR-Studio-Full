@@ -1267,7 +1267,7 @@ export default function GenerateModal({ onClose }: GenerateModalProps) {
                               <span>Edit proportions</span>
                             </button>
                             
-                            {(session?.user?.email === "janapativarsha6@gmail.com" || userTier === "SUPER_ADMIN" || userTier === "PAID") && (
+                            {(session?.user?.email === "janapativarsha6@gmail.com" || session?.user?.email === "ganesh@tryitfirst.in" || userTier === "SUPER_ADMIN" || userTier === "PAID") && (
                               <div className="flex gap-3 w-full">
                                 <button
                                   type="button"

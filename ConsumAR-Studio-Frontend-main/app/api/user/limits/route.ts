@@ -108,7 +108,7 @@ export async function GET(req: Request) {
       currentConfig = getConfig(tier);
       currentGenConfig = getGenConfig(tier);
 
-      if (data.isAdmin || userEmail === "janapativarsha6@gmail.com") {
+      if (data.isAdmin || userEmail === "janapativarsha6@gmail.com" || userEmail === "ganesh@tryitfirst.in") {
         return NextResponse.json({
           success: true,
           tier: "SUPER_ADMIN",

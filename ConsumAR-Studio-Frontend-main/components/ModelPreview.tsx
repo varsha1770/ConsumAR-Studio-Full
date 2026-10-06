@@ -94,6 +94,8 @@ export default function ModelPreview({ glbUrl, usdzUrl }: ModelPreviewProps) {
           ar-modes="quick-look scene-viewer webxr"
           ar-placement="floor"
           ar-scale="auto"
+          exposure="0.5"
+          tone-mapping="neutral"
           // Let the wrapper's aspect ratio dictate the size
           style={{ width: "100%", height: "100%" }}
         >

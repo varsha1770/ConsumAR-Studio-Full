@@ -56,7 +56,7 @@ export async function POST(req: Request) {
       SET "dailyUploadLimit" = $2, "dailyRescaleLimit" = $3, "monthlyRescaleLimit" = $4, 
           "dailyUsdzLimit" = $5, "monthlyUsdzLimit" = $6, "historyDownloadLimit" = $7, 
           "allowedUnits" = $8, "isUsdzUnlimited" = $9
-      WHERE tier = $1
+      WHERE tier = $1::"Tier"
     `, tier, dailyUploadLimit, dailyRescaleLimit, monthlyRescaleLimit, dailyUsdzLimit, monthlyUsdzLimit, historyDownloadLimit, allowedUnits, isUsdzUnlimited);
 
     return NextResponse.json({ success: true });

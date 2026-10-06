@@ -328,7 +328,8 @@ export default function ModelPreview3D({
         bounds="tight"
         camera-orbit={`45deg 75deg ${orbitDist}`}
         camera-controls
-        exposure="1.0"
+        exposure="0.5"
+        tone-mapping="neutral"
         shadow-intensity="1.5"
         environment-image="neutral"
         style={{ width: "100%", height: "100%", flex: 1, backgroundColor: "#ffffff" }}

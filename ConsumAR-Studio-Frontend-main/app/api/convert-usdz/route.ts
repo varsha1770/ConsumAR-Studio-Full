@@ -40,7 +40,7 @@ export async function POST(request: Request) {
       const userTier = user?.tier || "FREE";
       currentConfig = getConfig(userTier);
 
-      if (user?.isAdmin || session.user.email === "janapativarsha6@gmail.com") {
+      if (user?.isAdmin || session.user.email === "janapativarsha6@gmail.com" || session.user.email === "ganesh@tryitfirst.in") {
         maxUsdz = 999999;
         maxUsdzMonth = 999999;
       } else {
@@ -380,7 +380,7 @@ async function getUsage(userId: string | null, ip: string, sessionEmail?: string
       SELECT tier, "isAdmin" FROM "Users" WHERE id = $1::uuid OR email = $2 LIMIT 1
     `, userId, userEmail);
     
-    const isAdmin = userResults[0]?.isAdmin || userEmail === "janapativarsha6@gmail.com";
+    const isAdmin = userResults[0]?.isAdmin || userEmail === "janapativarsha6@gmail.com" || userEmail === "ganesh@tryitfirst.in";
     tier = userResults[0]?.tier || "FREE";
     
     if (isAdmin) {

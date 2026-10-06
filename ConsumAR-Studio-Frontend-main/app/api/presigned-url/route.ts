@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
     userId = session.user.id;
     const user = await (prisma.user as any).findUnique({ where: { id: userId }});
     const tier = user?.tier || "FREE";
-    const isAdmin = user?.isAdmin || tier === "SUPER_ADMIN" || session.user?.email === "janapativarsha6@gmail.com";
+    const isAdmin = user?.isAdmin || tier === "SUPER_ADMIN" || session.user?.email === "janapativarsha6@gmail.com" || session.user?.email === "ganesh@tryitfirst.in";
 
     if (isAdmin) {
       maxUploads = 999999;

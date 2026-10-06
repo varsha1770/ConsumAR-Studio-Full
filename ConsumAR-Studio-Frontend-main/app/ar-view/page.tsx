@@ -12,6 +12,7 @@ function ARViewer() {
   const [isLoading, setIsLoading] = useState(!!id);
   const [showSafariModal, setShowSafariModal] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
 
   const modelViewerRef = useRef<any>(null);
 
@@ -52,6 +53,14 @@ function ARViewer() {
 
     return () => clearInterval(interval);
   }, [id]);
+
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (isLoading && !usdzUrl) {
+      timer = setInterval(() => setElapsed(e => e + 1), 1000);
+    }
+    return () => clearInterval(timer);
+  }, [isLoading, usdzUrl]);
 
   if (!isMounted || (isLoading && !glbUrl)) {
     return (
@@ -159,6 +168,8 @@ function ARViewer() {
         ar-modes="quick-look scene-viewer webxr"
         ar-placement="floor"
         ar-scale="auto"
+        exposure="0.5"
+        tone-mapping="neutral"
         style={{ width: "100%", height: "100%" }}
       />
 
@@ -188,7 +199,7 @@ function ARViewer() {
             className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[3000] px-6 py-3 rounded-full shadow-xl border transition-all flex items-center justify-center font-bold text-base cursor-pointer bg-amber-500 border-amber-400 text-white hover:bg-amber-600 active:scale-95"
           >
             <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-            <span>Preparing AR (Tap to check)...</span>
+            <span>Preparing AR ({elapsed}s)...</span>
           </button>
         )
       ) : (

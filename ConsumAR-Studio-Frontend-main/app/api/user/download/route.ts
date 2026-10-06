@@ -23,20 +23,22 @@ export async function GET(req: Request) {
     const userResults: any[] = await prisma.$queryRawUnsafe(`SELECT tier FROM "Users" WHERE id = $1::uuid LIMIT 1`, userId);
     const tier = userResults[0]?.tier || "FREE";
 
-    const configResults: any[] = await prisma.$queryRawUnsafe(`SELECT "historyDownloadLimit" FROM "FeatureConfig" WHERE tier = $1 LIMIT 1`, tier);
+    const configResults: any[] = await prisma.$queryRawUnsafe(`SELECT "historyDownloadLimit" FROM "FeatureConfig" WHERE tier = $1::"Tier" LIMIT 1`, tier);
     const userEmailResults: any[] = await prisma.$queryRawUnsafe(`SELECT email FROM "Users" WHERE id = $1::uuid LIMIT 1`, userId);
     const userEmail = userEmailResults[0]?.email;
     
     let limit = configResults[0]?.historyDownloadLimit || (tier === "PAID" ? 10 : 2);
-    if (userEmail === "janapativarsha6@gmail.com") {
+    const isAdmin = userEmail === "janapativarsha6@gmail.com" || userEmail === "ganesh@tryitfirst.in";
+    
+    if (isAdmin) {
       limit = 999999;
     }
 
     if (type === "history") {
-      const items: any[] = await prisma.$queryRawUnsafe(`SELECT * FROM "historyItem" WHERE id = $1 LIMIT 1`, id);
+      const items: any[] = await prisma.$queryRawUnsafe(`SELECT * FROM "history_items" WHERE id = $1 LIMIT 1`, id);
       const item = items[0];
       
-      if (!item || item.userId !== userId) {
+      if (!item || (!isAdmin && item.userId !== userId)) {
         return NextResponse.json({ success: false, error: "Not found" }, { status: 404 });
       }
 
@@ -57,21 +59,34 @@ export async function GET(req: Request) {
         }
       }
       
-      await prisma.$executeRawUnsafe(`UPDATE "historyItem" SET "downloadCount" = "downloadCount" + 1 WHERE id = $1`, id);
+      await prisma.$executeRawUnsafe(`UPDATE "history_items" SET "downloadCount" = "downloadCount" + 1 WHERE id = $1`, id);
 
     } else {
-      const activityResults: any[] = await prisma.$queryRawUnsafe(`SELECT * FROM activity WHERE id = $1 LIMIT 1`, id);
+      const activityResults: any[] = await prisma.$queryRawUnsafe(`SELECT * FROM activities WHERE id = $1 LIMIT 1`, id);
       const activity = activityResults[0];
       
-      if (!activity || activity.userId !== userId) {
+      if (!activity || (!isAdmin && activity.userId !== userId)) {
         return NextResponse.json({ success: false, error: "Not found" }, { status: 404 });
       }
 
-      await prisma.$executeRawUnsafe(`UPDATE activity SET "downloadCount" = "downloadCount" + 1 WHERE id = $1`, id);
+      await prisma.$executeRawUnsafe(`UPDATE activities SET "downloadCount" = "downloadCount" + 1 WHERE id = $1`, id);
     }
 
-    // Redirect to actual S3 presigned URL or public URL
-    return NextResponse.redirect(fileUrl);
+    // Proxy the file instead of redirecting
+    // This fixes S3 Signature errors and allows local USDZ files to be downloaded from other devices!
+    const response = await fetch(fileUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch file: ${response.statusText}`);
+    }
+
+    const fileName = fileUrl.split('/').pop()?.split('?')[0] || 'downloaded_file';
+    
+    return new NextResponse(response.body as any, {
+      headers: {
+        "Content-Disposition": `attachment; filename="${fileName}"`,
+        "Content-Type": response.headers.get("Content-Type") || "application/octet-stream"
+      }
+    });
 
   } catch (error: any) {
     console.error("[download_api] Error:", error);

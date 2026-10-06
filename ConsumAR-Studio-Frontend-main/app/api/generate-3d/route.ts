@@ -21,7 +21,7 @@ export async function POST(request: Request) {
     if (!isGuest) {
       const user: any = await prisma.$queryRawUnsafe(`SELECT tier, "isAdmin" FROM "Users" WHERE id = $1::uuid LIMIT 1`, userId);
       const tier = user?.[0]?.tier || "FREE";
-      const isAdmin = user?.[0]?.isAdmin || tier === "SUPER_ADMIN" || session?.user?.email === "janapativarsha6@gmail.com";
+      const isAdmin = user?.[0]?.isAdmin || tier === "SUPER_ADMIN" || session?.user?.email === "janapativarsha6@gmail.com" || session?.user?.email === "ganesh@tryitfirst.in";
 
       if (!isAdmin) {
         const config: any = await prisma.$queryRawUnsafe(`SELECT "dailyLimit" FROM "GenConfig" WHERE tier = $1::"Tier" LIMIT 1`, tier);
@@ -54,7 +54,7 @@ export async function POST(request: Request) {
             "expiresAt" = $1::timestamp, "lastUsage" = NOW() WHERE "id" = $2::uuid
           `, nextExpiry.toISOString(), guest.id);
         } else {
-          const guestConfig: any = await prisma.$queryRawUnsafe(`SELECT "dailyLimit" FROM "GenConfig" WHERE tier = 'NON_LOGGED' LIMIT 1`);
+          const guestConfig: any = await prisma.$queryRawUnsafe(`SELECT "dailyLimit" FROM "GenConfig" WHERE tier = 'NON_LOGGED'::"Tier" LIMIT 1`);
           const guestLimit = guestConfig?.[0]?.dailyLimit || 2;
           if ((guest.generate3dCount || 0) >= guestLimit) {
             return NextResponse.json({ success: false, error: 'Guest daily 3D Generation limit reached. Please log in.' }, { status: 403 });
